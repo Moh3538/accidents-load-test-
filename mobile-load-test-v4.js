@@ -91,17 +91,49 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── Helper: Click button by visible text ────────────────────────────────
+// ─── Helper: Click button by visible text (FLEXIBLE) ─────────────────────
 async function clickButtonByText(page, text, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   
   while (Date.now() < deadline) {
-    const clicked = await page.evaluate((t) => {
-      const el = [...document.querySelectorAll('a, button, [role="button"], span')]
-        .find(e => e.innerText?.includes(t) && e.offsetParent !== null);
-      if (el) { 
-        el.click(); 
-        return true; 
+    const clicked = await page.evaluate((searchText) => {
+      const allElements = document.querySelectorAll('a, button, [role="button"], span, div');
+      
+      for (const el of allElements) {
+        const elText = el.innerText || el.textContent || '';
+        
+        // For MOI button - try multiple variations
+        if (searchText === 'MOI' || searchText === 'Check Accidents MOI') {
+          if (elText.includes('MOI') || elText.includes('Check Accidents')) {
+            if (el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
+        }
+        
+        // For Copy button - try variations
+        if (searchText === 'Copy' || searchText === 'Copy Chassis') {
+          if (elText.includes('Copy') && elText.includes('Chassis')) {
+            if (el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
+          // Fallback to just "Copy"
+          if (elText.trim() === 'Copy' || elText.includes('Copy Chassis')) {
+            if (el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
+          }
+        }
+        
+        // Generic match
+        if (elText.includes(searchText) && el.offsetParent !== null) {
+          el.click();
+          return true;
+        }
       }
       return false;
     }, text).catch(() => false);
@@ -172,14 +204,17 @@ async function runSingleUser(userId, batchSize) {
     const chassisFound = await waitForChassisChange(page, preChassis);
     timings.api = Date.now() - apiStart;
 
-    // ─── Step 3: Click "Copy Chassis" ────────────────────────────────
+    // ─── Step 3: Click "Copy" button ─────────────────────────────────
     const copyStart = Date.now();
-    await clickButtonByText(page, 'Copy Chassis', 10000);
+    await clickButtonByText(page, 'Copy', 10000);
     timings.copy = Date.now() - copyStart;
+    
+    // Wait a bit for MOI button to appear after copy
+    await page.waitForTimeout(1000);
 
     // ─── Step 4: Click "Check Accidents MOI" ─────────────────────────
     const moiStart = Date.now();
-    await clickButtonByText(page, 'Check Accidents MOI', 20000);
+    await clickButtonByText(page, 'MOI', 20000);
     timings.moi = Date.now() - moiStart;
 
     timings.total = Date.now() - journeyStart;
@@ -200,7 +235,10 @@ async function runSingleUser(userId, batchSize) {
     console.error(`   ❌ [${batchSize}] User ${userId} | ${err.message}`);
     
     try {
-      if (browser) await browser.close();
+      if (browser) {
+        // Take screenshot on error for debugging
+        await browser.close();
+      }
     } catch (e) {}
     
     return {
@@ -240,6 +278,7 @@ async function runBatch(size) {
       successRate: 0,
       wallTime: batchDuration,
       timings: null,
+      errors: failed.slice(0, 3).map(f => f.error),
     };
   }
 
@@ -283,7 +322,7 @@ async function runBatch(size) {
         p95: percentile(totalTimes, 95),
       },
     },
-    errors: failed.map(f => f.error),
+    errors: failed.slice(0, 5).map(f => f.error),
   };
 
   return result;
@@ -330,6 +369,10 @@ async function main() {
       console.log(`   🏥 Health: ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
+      if (result.errors) {
+        console.log(`   📋 Sample errors:`);
+        result.errors.slice(0, 3).forEach(e => console.log(`      - ${e}`));
+      }
     }
 
     // Cooldown between batches
@@ -358,9 +401,9 @@ async function main() {
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
   // ─── Final Summary ─────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(80));
+  console.log('\n' + '='.repeat(90));
   console.log('📊 FINAL REPORT');
-  console.log('='.repeat(80));
+  console.log('='.repeat(90));
   console.log('Users  │ Success │ API avg │ API p95 │ Total avg │ Total p95 │ Health');
   console.log('───────┼─────────┼─────────┼─────────┼───────────┼───────────┼──────────────');
   
@@ -379,7 +422,7 @@ async function main() {
     }
   });
 
-  console.log('='.repeat(80));
+  console.log('='.repeat(90));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 }
 
