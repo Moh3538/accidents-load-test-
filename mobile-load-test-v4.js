@@ -117,7 +117,6 @@ async function clickButtonByText(page, text, timeoutMs = 15000) {
 async function runSingleUser(userId, batchSize) {
   let browser;
   
-  // Select random device
   const device = MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
   const imageFile = IMAGES[(userId - 1) % IMAGES.length];
   
@@ -162,10 +161,10 @@ async function runSingleUser(userId, batchSize) {
     // ═══════════════════════════════════════════════════════════════
     const journeyStart = Date.now();
 
-    // ─── Step 1: Upload ─────────────────────────────────────────────
+    // ─── Step 1: Upload (file input is hidden, set directly) ─────────
     const uploadStart = Date.now();
-    await page.locator('input[type="file"]').first().waitFor({ timeout: 15000 });
-    await page.locator('input[type="file"]').first().setInputFiles(imageFile);
+    const fileInput = page.locator('input[type="file"]').first();
+    await fileInput.setInputFiles(imageFile);
     timings.upload = Date.now() - uploadStart;
 
     // ─── Step 2: API Processing ─────────────────────────────────────
@@ -185,7 +184,7 @@ async function runSingleUser(userId, batchSize) {
 
     timings.total = Date.now() - journeyStart;
 
-    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound} | total: ${(timings.total / 1000).toFixed(2)}s`);
+    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}... | total: ${(timings.total / 1000).toFixed(2)}s`);
 
     await page.waitForTimeout(2000);
     await browser.close();
@@ -359,11 +358,11 @@ async function main() {
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
   // ─── Final Summary ─────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(60));
+  console.log('\n' + '='.repeat(80));
   console.log('📊 FINAL REPORT');
-  console.log('='.repeat(60));
+  console.log('='.repeat(80));
   console.log('Users  │ Success │ API avg │ API p95 │ Total avg │ Total p95 │ Health');
-  console.log('───────┼─────────┼─────────┼─────────┼───────────┼───────────┼──────────');
+  console.log('───────┼─────────┼─────────┼─────────┼───────────┼───────────┼──────────────');
   
   allResults.forEach(r => {
     if (r.timings) {
@@ -380,7 +379,7 @@ async function main() {
     }
   });
 
-  console.log('='.repeat(60));
+  console.log('='.repeat(80));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 }
 
