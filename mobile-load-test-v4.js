@@ -1,222 +1,387 @@
+const { chromium } = require('playwright');
+const fs = require('fs');
+
 /**
  * ================================================================
- *  iCarsU.com  –  k6 BROWSER LOAD TEST
+ *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST
  *  Flow: Upload → API → Copy Chassis → Check Accidents MOI
- *  Runs on Grafana Cloud k6 (their servers, not your network)
+ *  Runs on GitHub Actions (stable network, no VUH limits)
  *
- *  HOW TO RUN:
- *
- *  LOCAL (your machine):
- *    k6 run --out cloud load-test.js
- *
- *  FULL CLOUD (recommended – unaffected by your network):
- *    k6 cloud load-test.js
- *
- *  Put all chassis images in the SAME folder as this script.
+ *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
  * ================================================================
  */
 
-import { browser }   from 'k6/browser';
-import { check }     from 'k6';
-import { Trend, Counter, Rate } from 'k6/metrics';
-import { scenario }  from 'k6/execution';
-
-// ─── Custom metrics (reported per batch via tags) ─────────────────────────────
-const mUpload  = new Trend('step_1_upload_ms',  true);
-const mApi     = new Trend('step_2_api_ms',     true);  // ← KEY metric
-const mCopy    = new Trend('step_3_copy_ms',    true);
-const mMoi     = new Trend('step_4_moi_ms',     true);
-const mTotal   = new Trend('total_journey_ms',  true);
-const cSuccess = new Counter('flow_success');
-const cFail    = new Counter('flow_failure');
-const rSuccess = new Rate('success_rate');
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ─── Chassis images (must be in same folder as this script) ──────────────────
-const IMAGES = [
-  'chassis1.jpg',  'chassis2.jpg',  'chassis3.jpg',
-  'chassis4.jpg',  'chassis5.jpg',  'chassis6.jpg',
-  'chassis7.jpg',  'chassis8.jpg',  'chassis9.jpg',
-  'chassis10.jpg',
+// ─── Mobile devices pool ──────────────────────────────────────────────────
+const MOBILE_DEVICES = [
+  { 
+    name: 'iPhone 14 Pro Max',
+    viewport: { width: 430, height: 932 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+  },
+  { 
+    name: 'Samsung Galaxy S23',
+    viewport: { width: 384, height: 854 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+  },
+  { 
+    name: 'Google Pixel 7',
+    viewport: { width: 412, height: 915 },
+    deviceScaleFactor: 2.75,
+    isMobile: true,
+    hasTouch: true,
+  },
+  { 
+    name: 'iPhone 13',
+    viewport: { width: 390, height: 844 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+  },
+  { 
+    name: 'Samsung Galaxy S21',
+    viewport: { width: 360, height: 800 },
+    deviceScaleFactor: 3,
+    isMobile: true,
+    hasTouch: true,
+  },
 ];
 
-// Mobile user-agent (iPhone 12)
 const MOBILE_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) ' +
                   'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
                   'Version/15.0 Mobile/15E148 Safari/604.1';
 
-const TARGET_URL   = 'https://icarsu.com/accidents/';
-const API_TIMEOUT  = 120_000; // 2 min
+// ─── Chassis images (must be in same folder) ──────────────────────────────
+const IMAGES = [
+  './chassis1.jpg',  './chassis2.jpg',  './chassis3.jpg',
+  './chassis4.jpg',  './chassis5.jpg',  './chassis6.jpg',
+  './chassis7.jpg',  './chassis8.jpg',  './chassis9.jpg',
+  './chassis10.jpg',
+];
 
-// ─── Scenario config: all 6 batches run sequentially ─────────────────────────
-// Each batch waits for the previous to finish + 30s cooldown
-export const options = {
-  scenarios: {
-    batch_005: {
-      executor:    'shared-iterations',
-      vus:         5,
-      iterations:  5,
-      startTime:   '0s',
-      maxDuration: '5m',
-      options: { browser: { type: 'chromium' } },
-    },
-    batch_010: {
-      executor:    'shared-iterations',
-      vus:         10,
-      iterations:  10,
-      startTime:   '5m30s',    // 5m run + 30s cooldown
-      maxDuration: '5m',
-      options: { browser: { type: 'chromium' } },
-    },
-    batch_015: {
-      executor:    'shared-iterations',
-      vus:         15,
-      iterations:  15,
-      startTime:   '11m',
-      maxDuration: '5m',
-      options: { browser: { type: 'chromium' } },
-    },
-    batch_020: {
-      executor:    'shared-iterations',
-      vus:         20,
-      iterations:  20,
-      startTime:   '16m30s',
-      maxDuration: '6m',
-      options: { browser: { type: 'chromium' } },
-    },
-    batch_050: {
-      executor:    'shared-iterations',
-      vus:         50,
-      iterations:  50,
-      startTime:   '23m',
-      maxDuration: '8m',
-      options: { browser: { type: 'chromium' } },
-    },
-    batch_100: {
-      executor:    'shared-iterations',
-      vus:         100,
-      iterations:  100,
-      startTime:   '32m',
-      maxDuration: '12m',
-      options: { browser: { type: 'chromium' } },
-    },
-  },
+const TARGET_URL = 'https://icarsu.com/accidents/';
+const API_TIMEOUT = 120000; // 2 minutes
 
-  // Fail thresholds – test fails if server can't meet these
-  thresholds: {
-    'step_2_api_ms':    ['p(95)<30000'],   // API must respond in <30s for 95% of users
-    'total_journey_ms': ['p(95)<60000'],   // Full journey <60s for 95%
-    'success_rate':     ['rate>0.8'],      // At least 80% success overall
-  },
-};
+// ─── Test batches ────────────────────────────────────────────────────────
+const BATCHES = [5, 10, 15, 20, 50, 100];
 
-// ── Helper: wait for element text to change ────────────────────────────────────
+// Results storage
+const allResults = [];
+
+// ─── Helper: Wait for chassis text to change ─────────────────────────────
 async function waitForChassisChange(page, before) {
   const deadline = Date.now() + API_TIMEOUT;
+  
   while (Date.now() < deadline) {
-    const current = await page
-      .evaluate(() => document.getElementById('chassisText')?.innerText?.trim() ?? '')
-      .catch(() => '');
-    if (current.length > 0 && current !== before) return current;
+    const current = await page.evaluate(() => {
+      const el = document.getElementById('chassisText');
+      return el?.innerText?.trim() ?? '';
+    }).catch(() => '');
+    
+    if (current.length > 0 && current !== before) {
+      return current;
+    }
+    
     await page.waitForTimeout(300);
   }
-  throw new Error(`#chassisText did not change within ${API_TIMEOUT / 1000}s`);
+  
+  throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ── Helper: click button by visible text ──────────────────────────────────────
-async function clickButtonByText(page, text, timeoutMs = 15_000) {
+// ─── Helper: Click button by visible text ────────────────────────────────
+async function clickButtonByText(page, text, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
+  
   while (Date.now() < deadline) {
     const clicked = await page.evaluate((t) => {
       const el = [...document.querySelectorAll('a, button, [role="button"], span')]
         .find(e => e.innerText?.includes(t) && e.offsetParent !== null);
-      if (el) { el.click(); return true; }
+      if (el) { 
+        el.click(); 
+        return true; 
+      }
       return false;
     }, text).catch(() => false);
+    
     if (clicked) return;
     await page.waitForTimeout(300);
   }
+  
   throw new Error(`Button "${text}" not found within ${timeoutMs / 1000}s`);
 }
 
-// ── Main test function ─────────────────────────────────────────────────────────
-export default async function () {
-  // Tag every metric with the batch name for per-batch averages in the report
-  const batchName = scenario.name;                             // e.g. "batch_050"
-  const batchSize = parseInt(batchName.split('_')[1]) || 0;   // e.g. 50
-  const tags      = { batch: String(batchSize) };
-
-  // Round-robin image selection across VUs
-  const imageFile = IMAGES[(__VU - 1) % IMAGES.length];
-
-  const page = await browser.newPage();
-  let success = false;
+// ─── Single user journey ─────────────────────────────────────────────────
+async function runSingleUser(userId, batchSize) {
+  let browser;
+  
+  // Select random device
+  const device = MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
+  const imageFile = IMAGES[(userId - 1) % IMAGES.length];
+  
+  const timings = {
+    upload: 0,
+    api: 0,
+    copy: 0,
+    moi: 0,
+    total: 0,
+  };
 
   try {
-    // ── MOBILE setup ────────────────────────────────────────────────────────
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.setExtraHTTPHeaders({ 'User-Agent': MOBILE_UA });
+    browser = await chromium.launch({
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-blink-features=AutomationControlled',
+      ],
+    });
 
-    // ── LOAD PAGE (not timed) ────────────────────────────────────────────────
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    const context = await browser.newContext({
+      ...device,
+      userAgent: MOBILE_UA,
+    });
+
+    const page = await context.newPage();
+
+    // ─── Load page (not timed) ────────────────────────────────────────
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(3000);
 
     // Snapshot chassis text before upload
-    const preChassis = await page
-      .evaluate(() => document.getElementById('chassisText')?.innerText?.trim() ?? '')
-      .catch(() => '');
+    const preChassis = await page.evaluate(() => {
+      const el = document.getElementById('chassisText');
+      return el?.innerText?.trim() ?? '';
+    }).catch(() => '');
 
-    // ── STEP 1: UPLOAD ───────────────────────────────────────────────────────
-    await page.locator('input[type="file"]').first().waitFor({ timeout: 15_000 });
+    // ═══════════════════════════════════════════════════════════════
+    // ⏱️ TIMER STARTS HERE (Upload → MOI Click)
+    // ═══════════════════════════════════════════════════════════════
+    const journeyStart = Date.now();
 
-    const t1 = Date.now();                                  // ⏱ TIMER STARTS
+    // ─── Step 1: Upload ─────────────────────────────────────────────
+    const uploadStart = Date.now();
+    await page.locator('input[type="file"]').first().waitFor({ timeout: 15000 });
     await page.locator('input[type="file"]').first().setInputFiles(imageFile);
-    mUpload.add(Date.now() - t1, tags);
+    timings.upload = Date.now() - uploadStart;
 
-    // ── STEP 2: API – wait for #chassisText to change ────────────────────────
-    const t2 = Date.now();
+    // ─── Step 2: API Processing ─────────────────────────────────────
+    const apiStart = Date.now();
     const chassisFound = await waitForChassisChange(page, preChassis);
-    mApi.add(Date.now() - t2, tags);
+    timings.api = Date.now() - apiStart;
 
-    // ── STEP 3: CLICK "Copy Chassis" ─────────────────────────────────────────
-    const t3 = Date.now();
-    await clickButtonByText(page, 'Copy Chassis', 10_000);
-    mCopy.add(Date.now() - t3, tags);
+    // ─── Step 3: Click "Copy Chassis" ────────────────────────────────
+    const copyStart = Date.now();
+    await clickButtonByText(page, 'Copy Chassis', 10000);
+    timings.copy = Date.now() - copyStart;
 
-    // ── STEP 4: WAIT + CLICK "Check Accidents MOI" ───────────────────────────
-    const t4 = Date.now();
-    await clickButtonByText(page, 'Check Accidents MOI', 20_000);
-    mMoi.add(Date.now() - t4, tags);                        // ⏱ TIMER ENDS
+    // ─── Step 4: Click "Check Accidents MOI" ─────────────────────────
+    const moiStart = Date.now();
+    await clickButtonByText(page, 'Check Accidents MOI', 20000);
+    timings.moi = Date.now() - moiStart;
 
-    // Total journey (steps 1–4 only, page load excluded)
-    mTotal.add(
-      mUpload.values.slice(-1)[0] +
-      (Date.now() - t2) +    // this is slightly off, let's compute properly
-      0, tags
-    );
+    timings.total = Date.now() - journeyStart;
 
-    // Better total: just sum the four durations we already recorded
-    const upload = Date.now() - t1;   // approximate reuse
-    // Actually track properly:
-    const t_end = Date.now();
-    const totalDuration = (t_end - t1);  // full wall time from upload to MOI click
-    mTotal.add(totalDuration, tags);
+    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound} | total: ${(timings.total / 1000).toFixed(2)}s`);
 
-    check(page, {
-      [`[batch ${batchSize}] chassis detected`]: () => chassisFound.length > 0,
-    });
+    await page.waitForTimeout(2000);
+    await browser.close();
 
-    console.log(`✅ [batch ${batchSize}] VU ${__VU} | chassis: ${chassisFound}`);
-    success = true;
-    cSuccess.add(1, tags);
+    return {
+      success: true,
+      userId,
+      batchSize,
+      timings,
+    };
 
   } catch (err) {
-    console.error(`❌ [batch ${batchSize}] VU ${__VU} | ${err.message}`);
-    cFail.add(1, tags);
-    check(page, {
-      [`[batch ${batchSize}] flow completed`]: () => false,
-    });
-  } finally {
-    rSuccess.add(success);
-    await page.close();
+    console.error(`   ❌ [${batchSize}] User ${userId} | ${err.message}`);
+    
+    try {
+      if (browser) await browser.close();
+    } catch (e) {}
+    
+    return {
+      success: false,
+      userId,
+      batchSize,
+      error: err.message,
+    };
   }
 }
+
+// ─── Run a single batch ────────────────────────────────────────────────
+async function runBatch(size) {
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(`🔥 BATCH: ${size} CONCURRENT USERS`);
+  console.log(`${'='.repeat(60)}`);
+
+  const startTime = Date.now();
+  
+  const promises = [];
+  for (let i = 0; i < size; i++) {
+    promises.push(runSingleUser(i + 1, size));
+  }
+
+  const results = await Promise.all(promises);
+  const batchDuration = (Date.now() - startTime) / 1000;
+  
+  const successful = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+
+  if (successful.length === 0) {
+    console.log(`\n   ❌ ALL ${size} USERS FAILED`);
+    return {
+      size,
+      success: 0,
+      total: size,
+      successRate: 0,
+      wallTime: batchDuration,
+      timings: null,
+    };
+  }
+
+  const apiTimes = successful.map(r => r.timings.api);
+  const totalTimes = successful.map(r => r.timings.total);
+  const uploadTimes = successful.map(r => r.timings.upload);
+  const copyTimes = successful.map(r => r.timings.copy);
+  const moiTimes = successful.map(r => r.timings.moi);
+
+  const result = {
+    size,
+    success: successful.length,
+    total: size,
+    successRate: (successful.length / size) * 100,
+    wallTime: batchDuration,
+    timings: {
+      upload: {
+        avg: avg(uploadTimes),
+        min: Math.min(...uploadTimes),
+        max: Math.max(...uploadTimes),
+        p95: percentile(uploadTimes, 95),
+      },
+      api: {
+        avg: avg(apiTimes),
+        min: Math.min(...apiTimes),
+        max: Math.max(...apiTimes),
+        p95: percentile(apiTimes, 95),
+      },
+      copy: {
+        avg: avg(copyTimes),
+        p95: percentile(copyTimes, 95),
+      },
+      moi: {
+        avg: avg(moiTimes),
+        p95: percentile(moiTimes, 95),
+      },
+      total: {
+        avg: avg(totalTimes),
+        min: Math.min(...totalTimes),
+        max: Math.max(...totalTimes),
+        p95: percentile(totalTimes, 95),
+      },
+    },
+    errors: failed.map(f => f.error),
+  };
+
+  return result;
+}
+
+// ─── Statistics helpers ────────────────────────────────────────────────
+function avg(arr) {
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+function percentile(arr, p) {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const index = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[index] || 0;
+}
+
+// ─── Health assessment ─────────────────────────────────────────────────
+function assessHealth(successRate, apiP95) {
+  if (successRate === 0) return '💀 OVERLOADED';
+  if (successRate < 50) return '💀 OVERLOADED';
+  if (successRate < 80) return '🔴 CRITICAL';
+  if (apiP95 > 20000) return '🟠 DEGRADED';
+  if (apiP95 > 10000) return '🟡 GOOD';
+  return '🟢 EXCELLENT';
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────
+async function main() {
+  console.log('\n📱 ========================================');
+  console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
+  console.log('📱 GitHub Actions | Stable Network');
+  console.log('📱 ========================================\n');
+
+  for (const size of BATCHES) {
+    const result = await runBatch(size);
+    allResults.push(result);
+
+    if (result.timings) {
+      console.log(`\n   📊 Batch ${size} Results:`);
+      console.log(`   ✅ Success: ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
+      console.log(`   ⏱️  Wall Time: ${result.wallTime.toFixed(2)}s`);
+      console.log(`   🔬 API: avg ${(result.timings.api.avg / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95 / 1000).toFixed(2)}s`);
+      console.log(`   📋 Total: avg ${(result.timings.total.avg / 1000).toFixed(2)}s | p95 ${(result.timings.total.p95 / 1000).toFixed(2)}s`);
+      console.log(`   🏥 Health: ${assessHealth(result.successRate, result.timings.api.p95)}`);
+    } else {
+      console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
+    }
+
+    // Cooldown between batches
+    if (BATCHES.indexOf(size) < BATCHES.length - 1) {
+      console.log('\n   ⏸️  Cooling down for 5 seconds...\n');
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  // ─── Generate CSV Report ────────────────────────────────────────────
+  let csv = 'Users,Success,SuccessRate,WallTime_s,API_avg_s,API_p95_s,Total_avg_s,Total_p95_s,Upload_avg_s,Copy_avg_s,MOI_avg_s,Health\n';
+  
+  allResults.forEach(r => {
+    if (r.timings) {
+      csv += `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},`;
+      csv += `${(r.timings.api.avg / 1000).toFixed(2)},${(r.timings.api.p95 / 1000).toFixed(2)},`;
+      csv += `${(r.timings.total.avg / 1000).toFixed(2)},${(r.timings.total.p95 / 1000).toFixed(2)},`;
+      csv += `${(r.timings.upload.avg / 1000).toFixed(2)},${(r.timings.copy.avg / 1000).toFixed(2)},${(r.timings.moi.avg / 1000).toFixed(2)},`;
+      csv += `${assessHealth(r.successRate, r.timings.api.p95)}\n`;
+    } else {
+      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,FAILED\n`;
+    }
+  });
+
+  fs.writeFileSync('load-test-results.csv', csv);
+  fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
+
+  // ─── Final Summary ─────────────────────────────────────────────────
+  console.log('\n' + '='.repeat(60));
+  console.log('📊 FINAL REPORT');
+  console.log('='.repeat(60));
+  console.log('Users  │ Success │ API avg │ API p95 │ Total avg │ Total p95 │ Health');
+  console.log('───────┼─────────┼─────────┼─────────┼───────────┼───────────┼──────────');
+  
+  allResults.forEach(r => {
+    if (r.timings) {
+      const users = r.size.toString().padEnd(6);
+      const success = `${r.success}/${r.total}`.padEnd(7);
+      const apiAvg = `${(r.timings.api.avg / 1000).toFixed(2)}s`.padEnd(8);
+      const apiP95 = `${(r.timings.api.p95 / 1000).toFixed(2)}s`.padEnd(8);
+      const totalAvg = `${(r.timings.total.avg / 1000).toFixed(2)}s`.padEnd(10);
+      const totalP95 = `${(r.timings.total.p95 / 1000).toFixed(2)}s`.padEnd(10);
+      const health = assessHealth(r.successRate, r.timings.api.p95);
+      console.log(`${users} │ ${success} │ ${apiAvg} │ ${apiP95} │ ${totalAvg} │ ${totalP95} │ ${health}`);
+    } else {
+      console.log(`${r.size.toString().padEnd(6)} │ 0/${r.total}  │ -       │ -       │ -         │ -         │ FAILED`);
+    }
+  });
+
+  console.log('='.repeat(60));
+  console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
+}
+
+main().catch(console.error);
