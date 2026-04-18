@@ -18,16 +18,19 @@ jobs:
         with:
           node-version: '20'
       
-      # Add k6 installation
+      # 👇 ADD THIS - Install k6
       - name: Install k6
         run: |
-          sudo gpg -k
-          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          curl -s https://dl.k6.io/key.gpg | sudo gpg --dearmor -o /usr/share/keyrings/k6-archive-keyring.gpg
           echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
           sudo apt-get update
-          sudo apt-get install k6
+          sudo apt-get install -y k6
       
-      - name: Install Node dependencies
+      # 👇 ADD THIS - Install k6 npm package for imports
+      - name: Install k6 Node package
+        run: npm install k6
+      
+      - name: Install Playwright
         run: npm install playwright
       
       - name: Install Playwright browsers
