@@ -4,7 +4,7 @@ const fs = require('fs');
 /**
  * ================================================================
  *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST
- *  Flow: Upload → API → Copy Chassis → Check Accidents MOI
+ *  Flow: Upload → API → Copy Chassis (STOPS HERE)
  *  Runs on GitHub Actions (stable network, no VUH limits)
  *
  *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
@@ -91,58 +91,35 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── Helper: Click button by visible text (FLEXIBLE) ─────────────────────
-async function clickButtonByText(page, text, timeoutMs = 15000) {
+// ─── Helper: Click Copy button ───────────────────────────────────────────
+async function clickCopyButton(page, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   
   while (Date.now() < deadline) {
-    const clicked = await page.evaluate((searchText) => {
+    const clicked = await page.evaluate(() => {
       const allElements = document.querySelectorAll('a, button, [role="button"], span, div');
       
       for (const el of allElements) {
         const elText = el.innerText || el.textContent || '';
         
-        // For MOI button - try multiple variations
-        if (searchText === 'MOI' || searchText === 'Check Accidents MOI') {
-          if (elText.includes('MOI') || elText.includes('Check Accidents')) {
-            if (el.offsetParent !== null) {
-              el.click();
-              return true;
-            }
+        // Look for "Copy" or "Copy Chassis"
+        if ((elText.includes('Copy') && elText.includes('Chassis')) || 
+            elText.trim() === 'Copy' ||
+            elText.includes('Copy Chassis')) {
+          if (el.offsetParent !== null) {
+            el.click();
+            return true;
           }
-        }
-        
-        // For Copy button - try variations
-        if (searchText === 'Copy' || searchText === 'Copy Chassis') {
-          if (elText.includes('Copy') && elText.includes('Chassis')) {
-            if (el.offsetParent !== null) {
-              el.click();
-              return true;
-            }
-          }
-          // Fallback to just "Copy"
-          if (elText.trim() === 'Copy' || elText.includes('Copy Chassis')) {
-            if (el.offsetParent !== null) {
-              el.click();
-              return true;
-            }
-          }
-        }
-        
-        // Generic match
-        if (elText.includes(searchText) && el.offsetParent !== null) {
-          el.click();
-          return true;
         }
       }
       return false;
-    }, text).catch(() => false);
+    }).catch(() => false);
     
     if (clicked) return;
     await page.waitForTimeout(300);
   }
   
-  throw new Error(`Button "${text}" not found within ${timeoutMs / 1000}s`);
+  throw new Error(`Copy button not found within ${timeoutMs / 1000}s`);
 }
 
 // ─── Single user journey ─────────────────────────────────────────────────
@@ -156,7 +133,6 @@ async function runSingleUser(userId, batchSize) {
     upload: 0,
     api: 0,
     copy: 0,
-    moi: 0,
     total: 0,
   };
 
@@ -189,7 +165,7 @@ async function runSingleUser(userId, batchSize) {
     }).catch(() => '');
 
     // ═══════════════════════════════════════════════════════════════
-    // ⏱️ TIMER STARTS HERE (Upload → MOI Click)
+    // ⏱️ TIMER STARTS HERE (Upload → Copy Click)
     // ═══════════════════════════════════════════════════════════════
     const journeyStart = Date.now();
 
@@ -206,20 +182,12 @@ async function runSingleUser(userId, batchSize) {
 
     // ─── Step 3: Click "Copy" button ─────────────────────────────────
     const copyStart = Date.now();
-    await clickButtonByText(page, 'Copy', 10000);
+    await clickCopyButton(page, 10000);
     timings.copy = Date.now() - copyStart;
-    
-    // Wait a bit for MOI button to appear after copy
-    await page.waitForTimeout(1000);
-
-    // ─── Step 4: Click "Check Accidents MOI" ─────────────────────────
-    const moiStart = Date.now();
-    await clickButtonByText(page, 'MOI', 20000);
-    timings.moi = Date.now() - moiStart;
 
     timings.total = Date.now() - journeyStart;
 
-    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}... | total: ${(timings.total / 1000).toFixed(2)}s`);
+    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}... | total: ${(timings.total / 1000).toFixed(2)}s (API: ${(timings.api / 1000).toFixed(2)}s)`);
 
     await page.waitForTimeout(2000);
     await browser.close();
@@ -235,10 +203,7 @@ async function runSingleUser(userId, batchSize) {
     console.error(`   ❌ [${batchSize}] User ${userId} | ${err.message}`);
     
     try {
-      if (browser) {
-        // Take screenshot on error for debugging
-        await browser.close();
-      }
+      if (browser) await browser.close();
     } catch (e) {}
     
     return {
@@ -286,7 +251,6 @@ async function runBatch(size) {
   const totalTimes = successful.map(r => r.timings.total);
   const uploadTimes = successful.map(r => r.timings.upload);
   const copyTimes = successful.map(r => r.timings.copy);
-  const moiTimes = successful.map(r => r.timings.moi);
 
   const result = {
     size,
@@ -310,10 +274,6 @@ async function runBatch(size) {
       copy: {
         avg: avg(copyTimes),
         p95: percentile(copyTimes, 95),
-      },
-      moi: {
-        avg: avg(moiTimes),
-        p95: percentile(moiTimes, 95),
       },
       total: {
         avg: avg(totalTimes),
@@ -354,6 +314,7 @@ async function main() {
   console.log('\n📱 ========================================');
   console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
   console.log('📱 GitHub Actions | Stable Network');
+  console.log('📱 Flow: Upload → API → Copy (stops here)');
   console.log('📱 ========================================\n');
 
   for (const size of BATCHES) {
@@ -383,17 +344,17 @@ async function main() {
   }
 
   // ─── Generate CSV Report ────────────────────────────────────────────
-  let csv = 'Users,Success,SuccessRate,WallTime_s,API_avg_s,API_p95_s,Total_avg_s,Total_p95_s,Upload_avg_s,Copy_avg_s,MOI_avg_s,Health\n';
+  let csv = 'Users,Success,SuccessRate,WallTime_s,API_avg_s,API_p95_s,Total_avg_s,Total_p95_s,Upload_avg_s,Copy_avg_s,Health\n';
   
   allResults.forEach(r => {
     if (r.timings) {
       csv += `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},`;
       csv += `${(r.timings.api.avg / 1000).toFixed(2)},${(r.timings.api.p95 / 1000).toFixed(2)},`;
       csv += `${(r.timings.total.avg / 1000).toFixed(2)},${(r.timings.total.p95 / 1000).toFixed(2)},`;
-      csv += `${(r.timings.upload.avg / 1000).toFixed(2)},${(r.timings.copy.avg / 1000).toFixed(2)},${(r.timings.moi.avg / 1000).toFixed(2)},`;
+      csv += `${(r.timings.upload.avg / 1000).toFixed(2)},${(r.timings.copy.avg / 1000).toFixed(2)},`;
       csv += `${assessHealth(r.successRate, r.timings.api.p95)}\n`;
     } else {
-      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,FAILED\n`;
+      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,FAILED\n`;
     }
   });
 
@@ -401,9 +362,9 @@ async function main() {
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
   // ─── Final Summary ─────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(90));
-  console.log('📊 FINAL REPORT');
-  console.log('='.repeat(90));
+  console.log('\n' + '='.repeat(85));
+  console.log('📊 FINAL REPORT (Upload → API → Copy Only)');
+  console.log('='.repeat(85));
   console.log('Users  │ Success │ API avg │ API p95 │ Total avg │ Total p95 │ Health');
   console.log('───────┼─────────┼─────────┼─────────┼───────────┼───────────┼──────────────');
   
@@ -422,7 +383,7 @@ async function main() {
     }
   });
 
-  console.log('='.repeat(90));
+  console.log('='.repeat(85));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 }
 
