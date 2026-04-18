@@ -91,6 +91,49 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
+// ─── Helper: Upload file with multiple selector attempts ─────────────────
+async function uploadFile(page, imageFile, timeoutMs = 30000) {
+  const selectors = [
+    'input[type="file"]',
+    'input[id="regImage"]',
+    '#regImage',
+    '[accept*="image"]',
+    'input[type="file"][accept]',
+  ];
+  
+  for (const selector of selectors) {
+    try {
+      const fileInput = page.locator(selector).first();
+      await fileInput.waitFor({ state: 'attached', timeout: 5000 });
+      await fileInput.setInputFiles(imageFile);
+      return true;
+    } catch (e) {
+      // Try next selector
+    }
+  }
+  
+  // Fallback: use evaluate to find and set file
+  const uploaded = await page.evaluate((filePath) => {
+    const input = document.querySelector('input[type="file"]') || 
+                  document.querySelector('#regImage') ||
+                  document.querySelector('[accept*="image"]');
+    if (input) {
+      // Can't actually set file via evaluate, but we tried
+      return true;
+    }
+    return false;
+  }, imageFile).catch(() => false);
+  
+  if (!uploaded) {
+    throw new Error('File input not found with any selector');
+  }
+  
+  // Last resort: use waitForSelector with longer timeout
+  await page.waitForSelector('input[type="file"]', { state: 'attached', timeout: timeoutMs });
+  const fileInput = page.locator('input[type="file"]').first();
+  await fileInput.setInputFiles(imageFile);
+}
+
 // ─── Helper: Click Copy button ───────────────────────────────────────────
 async function clickCopyButton(page, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
@@ -169,10 +212,9 @@ async function runSingleUser(userId, batchSize) {
     // ═══════════════════════════════════════════════════════════════
     const journeyStart = Date.now();
 
-    // ─── Step 1: Upload (file input is hidden, set directly) ─────────
+    // ─── Step 1: Upload with multiple selector attempts ──────────────
     const uploadStart = Date.now();
-    const fileInput = page.locator('input[type="file"]').first();
-    await fileInput.setInputFiles(imageFile);
+    await uploadFile(page, imageFile);
     timings.upload = Date.now() - uploadStart;
 
     // ─── Step 2: API Processing ─────────────────────────────────────
