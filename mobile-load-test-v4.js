@@ -160,7 +160,8 @@ async function runSingleUser(userId, batchSize) {
     upload: 0,
     api: 0,
     copy: 0,
-    total: 0,
+    journeyTotal: 0,    // Upload → API → Copy
+    fullTotal: 0,       // Page Load + Journey Total
   };
 
   try {
@@ -181,7 +182,12 @@ async function runSingleUser(userId, batchSize) {
 
     const page = await context.newPage();
 
-    // ─── Step 0: Page Load (TIMED) ────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════
+    // ⏱️ FULL TIMER STARTS HERE (Page Load → Upload → API → Copy)
+    // ═══════════════════════════════════════════════════════════════
+    const fullStart = Date.now();
+
+    // ─── Step 0: Page Load ────────────────────────────────────────────
     const pageStart = Date.now();
     await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
@@ -214,9 +220,10 @@ async function runSingleUser(userId, batchSize) {
     await clickCopyButton(page, 10000);
     timings.copy = Date.now() - copyStart;
 
-    timings.total = Date.now() - journeyStart;
+    timings.journeyTotal = Date.now() - journeyStart;
+    timings.fullTotal = Date.now() - fullStart;
 
-    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}... | page: ${(timings.pageLoad/1000).toFixed(2)}s | total: ${(timings.total/1000).toFixed(2)}s (API: ${(timings.api/1000).toFixed(2)}s)`);
+    console.log(`   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}... | page: ${(timings.pageLoad/1000).toFixed(2)}s | journey: ${(timings.journeyTotal/1000).toFixed(2)}s | FULL: ${(timings.fullTotal/1000).toFixed(2)}s`);
 
     await page.waitForTimeout(1000);
     await browser.close();
@@ -246,9 +253,9 @@ async function runSingleUser(userId, batchSize) {
 
 // ─── Run a single batch ────────────────────────────────────────────────
 async function runBatch(size) {
-  console.log(`\n${'='.repeat(70)}`);
+  console.log(`\n${'='.repeat(80)}`);
   console.log(`🔥 BATCH: ${size} CONCURRENT USERS`);
-  console.log(`${'='.repeat(70)}`);
+  console.log(`${'='.repeat(80)}`);
 
   const startTime = Date.now();
   
@@ -278,7 +285,8 @@ async function runBatch(size) {
 
   const pageLoadTimes = successful.map(r => r.timings.pageLoad);
   const apiTimes = successful.map(r => r.timings.api);
-  const totalTimes = successful.map(r => r.timings.total);
+  const journeyTimes = successful.map(r => r.timings.journeyTotal);
+  const fullTimes = successful.map(r => r.timings.fullTotal);
   const uploadTimes = successful.map(r => r.timings.upload);
   const copyTimes = successful.map(r => r.timings.copy);
 
@@ -311,11 +319,17 @@ async function runBatch(size) {
         avg: avg(copyTimes),
         p95: percentile(copyTimes, 95),
       },
-      total: {
-        avg: avg(totalTimes),
-        min: Math.min(...totalTimes),
-        max: Math.max(...totalTimes),
-        p95: percentile(totalTimes, 95),
+      journey: {
+        avg: avg(journeyTimes),
+        min: Math.min(...journeyTimes),
+        max: Math.max(...journeyTimes),
+        p95: percentile(journeyTimes, 95),
+      },
+      full: {
+        avg: avg(fullTimes),
+        min: Math.min(...fullTimes),
+        max: Math.max(...fullTimes),
+        p95: percentile(fullTimes, 95),
       },
     },
     errors: failed.slice(0, 5).map(f => f.error),
@@ -351,6 +365,7 @@ async function main() {
   console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
   console.log('📱 GitHub Actions | Stable Network');
   console.log('📱 Flow: Page Load → Upload → API → Copy');
+  console.log('📱 FULL TIMING INCLUDED');
   console.log('📱 ========================================\n');
 
   for (const size of BATCHES) {
@@ -363,7 +378,8 @@ async function main() {
       console.log(`   ⏱️  Wall Time: ${result.wallTime.toFixed(2)}s`);
       console.log(`   📄 Page Load: avg ${(result.timings.pageLoad.avg / 1000).toFixed(2)}s | p95 ${(result.timings.pageLoad.p95 / 1000).toFixed(2)}s`);
       console.log(`   🔬 API: avg ${(result.timings.api.avg / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95 / 1000).toFixed(2)}s`);
-      console.log(`   📋 Journey: avg ${(result.timings.total.avg / 1000).toFixed(2)}s | p95 ${(result.timings.total.p95 / 1000).toFixed(2)}s`);
+      console.log(`   📋 Journey: avg ${(result.timings.journey.avg / 1000).toFixed(2)}s | p95 ${(result.timings.journey.p95 / 1000).toFixed(2)}s`);
+      console.log(`   🎯 FULL TOTAL: avg ${(result.timings.full.avg / 1000).toFixed(2)}s | p95 ${(result.timings.full.p95 / 1000).toFixed(2)}s`);
       console.log(`   🏥 Health: ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
@@ -380,18 +396,19 @@ async function main() {
   }
 
   // ─── Generate CSV Report ────────────────────────────────────────────
-  let csv = 'Users,Success,SuccessRate,WallTime_s,PageLoad_avg_s,PageLoad_p95_s,API_avg_s,API_p95_s,Journey_avg_s,Journey_p95_s,Upload_avg_s,Copy_avg_s,Health\n';
+  let csv = 'Users,Success,SuccessRate,WallTime_s,PageLoad_avg_s,PageLoad_p95_s,API_avg_s,API_p95_s,Journey_avg_s,Journey_p95_s,FULL_avg_s,FULL_p95_s,Upload_avg_s,Copy_avg_s,Health\n';
   
   allResults.forEach(r => {
     if (r.timings) {
       csv += `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},`;
       csv += `${(r.timings.pageLoad.avg / 1000).toFixed(2)},${(r.timings.pageLoad.p95 / 1000).toFixed(2)},`;
       csv += `${(r.timings.api.avg / 1000).toFixed(2)},${(r.timings.api.p95 / 1000).toFixed(2)},`;
-      csv += `${(r.timings.total.avg / 1000).toFixed(2)},${(r.timings.total.p95 / 1000).toFixed(2)},`;
+      csv += `${(r.timings.journey.avg / 1000).toFixed(2)},${(r.timings.journey.p95 / 1000).toFixed(2)},`;
+      csv += `${(r.timings.full.avg / 1000).toFixed(2)},${(r.timings.full.p95 / 1000).toFixed(2)},`;
       csv += `${(r.timings.upload.avg / 1000).toFixed(2)},${(r.timings.copy.avg / 1000).toFixed(2)},`;
       csv += `${assessHealth(r.successRate, r.timings.api.p95)}\n`;
     } else {
-      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,0,FAILED\n`;
+      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,0,0,0,FAILED\n`;
     }
   });
 
@@ -399,11 +416,11 @@ async function main() {
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
   // ─── Final Summary ─────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(105));
-  console.log('📊 FINAL REPORT (Page Load → Upload → API → Copy)');
-  console.log('='.repeat(105));
-  console.log('Users  │ Success │ Page (avg/p95) │ API (avg/p95) │ Journey (avg/p95) │ Health');
-  console.log('───────┼─────────┼─────────────────┼────────────────┼────────────────────┼──────────────');
+  console.log('\n' + '='.repeat(120));
+  console.log('📊 FINAL REPORT (Page Load → Upload → API → Copy) - FULL TIMING');
+  console.log('='.repeat(120));
+  console.log('Users  │ Success │ Page (avg/p95) │ API (avg/p95) │ Journey (avg/p95) │ FULL (avg/p95) │ Health');
+  console.log('───────┼─────────┼─────────────────┼────────────────┼────────────────────┼─────────────────┼──────────────');
   
   allResults.forEach(r => {
     if (r.timings) {
@@ -411,20 +428,21 @@ async function main() {
       const success = `${r.success}/${r.total}`.padEnd(7);
       const page = `${(r.timings.pageLoad.avg/1000).toFixed(1)}/${(r.timings.pageLoad.p95/1000).toFixed(1)}s`.padEnd(15);
       const api = `${(r.timings.api.avg/1000).toFixed(1)}/${(r.timings.api.p95/1000).toFixed(1)}s`.padEnd(14);
-      const journey = `${(r.timings.total.avg/1000).toFixed(1)}/${(r.timings.total.p95/1000).toFixed(1)}s`.padEnd(18);
+      const journey = `${(r.timings.journey.avg/1000).toFixed(1)}/${(r.timings.journey.p95/1000).toFixed(1)}s`.padEnd(18);
+      const full = `${(r.timings.full.avg/1000).toFixed(1)}/${(r.timings.full.p95/1000).toFixed(1)}s`.padEnd(15);
       const health = assessHealth(r.successRate, r.timings.api.p95);
-      console.log(`${users} │ ${success} │ ${page} │ ${api} │ ${journey} │ ${health}`);
+      console.log(`${users} │ ${success} │ ${page} │ ${api} │ ${journey} │ ${full} │ ${health}`);
     } else {
-      console.log(`${r.size.toString().padEnd(6)} │ 0/${r.total}  │ -               │ -              │ -                  │ FAILED`);
+      console.log(`${r.size.toString().padEnd(6)} │ 0/${r.total}  │ -               │ -              │ -                  │ -               │ FAILED`);
     }
   });
 
-  console.log('='.repeat(105));
+  console.log('='.repeat(120));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
   
   // ─── Executive Summary ──────────────────────────────────────────────
   console.log('📋 EXECUTIVE SUMMARY:');
-  console.log('─────────────────────────────────────────────────────────────────────');
+  console.log('─────────────────────────────────────────────────────────────────────────────────────────');
   
   const safeLimit = allResults.filter(r => r.successRate >= 90).pop()?.size || 10;
   const overloadPoint = allResults.find(r => r.successRate < 50)?.size || 50;
@@ -432,6 +450,8 @@ async function main() {
   console.log(`   ✅ Safe concurrent mobile users: ${safeLimit}`);
   console.log(`   ⚠️  Performance degrades at: ${safeLimit + 5} users`);
   console.log(`   ❌ Server overloaded at: ${overloadPoint} users`);
+  console.log('');
+  console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy (complete user experience)');
   console.log('');
 }
 
