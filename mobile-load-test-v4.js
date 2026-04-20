@@ -5,10 +5,10 @@ const fs = require('fs');
  * ================================================================
  *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST
  *  Flow: Page Load → Upload → API → Copy Chassis
- *  Runs on GitHub Actions (stable network, no VUH limits) 
+ *  Runs on GitHub Actions (stable network, no VUH limits)
  *
  *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
- *  FIX: Chunked concurrency to avoid RAM exhaustion on GH Actions
+ *  كل batch بتشغّل كل اليوزرز مع بعض في نفس اللحظة
  * ================================================================
  */
 
@@ -64,16 +64,12 @@ const IMAGES = [
   './chassis10.jpg',
 ];
 
-const TARGET_URL   = 'https://icarsu.com/accidents/';
-const API_TIMEOUT  = 120000; // 2 minutes
+const TARGET_URL  = 'https://icarsu.com/accidents/';
+const API_TIMEOUT = 120000; // 2 minutes
 
 // ─── Test batches ─────────────────────────────────────────────────────────
+// كل رقم = عدد اليوزرز اللي بيشتغلوا مع بعض في نفس اللحظة
 const BATCHES = [5, 10, 15, 20, 50, 100];
-
-// FIX: Max browsers running at the same time to avoid OOM on GitHub Actions.
-// GitHub Actions runners have ~7 GB RAM.
-// Each Chromium instance uses ~150–200 MB → safe ceiling is ~25 at once.
-const MAX_CONCURRENT = 20;
 
 // Results storage
 const allResults = [];
@@ -101,8 +97,6 @@ async function waitForChassisChange(page, before) {
 }
 
 // ─── Helper: Upload file with multiple selector attempts ──────────────────
-// FIX: Always returns a resolved/rejected Promise so the caller can await it
-// properly. Added explicit throw on total failure instead of silent return.
 async function uploadFile(page, imageFile, timeoutMs = 30000) {
   const selectors = [
     'input[type="file"]',
@@ -117,7 +111,7 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
       const fileInput = page.locator(selector).first();
       await fileInput.waitFor({ state: 'attached', timeout: 5000 });
       await fileInput.setInputFiles(imageFile);
-      return; // success
+      return;
     } catch {
       // try next selector
     }
@@ -179,8 +173,8 @@ async function runSingleUser(userId, batchSize) {
     upload:       0,
     api:          0,
     copy:         0,
-    journeyTotal: 0, // Upload → API → Copy
-    fullTotal:    0, // Page Load + Journey Total
+    journeyTotal: 0,
+    fullTotal:    0,
   };
 
   try {
@@ -201,9 +195,7 @@ async function runSingleUser(userId, batchSize) {
 
     const page = await context.newPage();
 
-    // ═══════════════════════════════════════════════════════════════
-    // ⏱️ FULL TIMER STARTS HERE (Page Load → Upload → API → Copy)
-    // ═══════════════════════════════════════════════════════════════
+    // ⏱️ FULL TIMER
     const fullStart = Date.now();
 
     // ─── Step 0: Page Load ────────────────────────────────────────
@@ -211,9 +203,8 @@ async function runSingleUser(userId, batchSize) {
     await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
 
-    await page.waitForTimeout(2000); // small wait for stability
+    await page.waitForTimeout(2000);
 
-    // Snapshot chassis text before upload
     const preChassis = await page
       .evaluate(() => {
         const el = document.getElementById('chassisText');
@@ -221,9 +212,7 @@ async function runSingleUser(userId, batchSize) {
       })
       .catch(() => '');
 
-    // ═══════════════════════════════════════════════════════════════
-    // ⏱️ JOURNEY TIMER STARTS HERE (Upload → Copy Click)
-    // ═══════════════════════════════════════════════════════════════
+    // ⏱️ JOURNEY TIMER
     const journeyStart = Date.now();
 
     // ─── Step 1: Upload ───────────────────────────────────────────
@@ -245,9 +234,10 @@ async function runSingleUser(userId, batchSize) {
     timings.fullTotal    = Date.now() - fullStart;
 
     console.log(
-      `   ✅ [${batchSize}] User ${userId} | chassis: ${chassisFound.substring(0, 10)}...` +
+      `   ✅ [Batch ${batchSize}] User ${userId}` +
+      ` | chassis: ${chassisFound.substring(0, 10)}...` +
       ` | page: ${(timings.pageLoad / 1000).toFixed(2)}s` +
-      ` | journey: ${(timings.journeyTotal / 1000).toFixed(2)}s` +
+      ` | api: ${(timings.api / 1000).toFixed(2)}s` +
       ` | FULL: ${(timings.fullTotal / 1000).toFixed(2)}s`
     );
 
@@ -257,12 +247,11 @@ async function runSingleUser(userId, batchSize) {
     return { success: true, userId, batchSize, timings };
 
   } catch (err) {
-    console.error(`   ❌ [${batchSize}] User ${userId} | ${err.message}`);
+    console.error(`   ❌ [Batch ${batchSize}] User ${userId} | ${err.message}`);
 
-    // FIX: Log browser-close failures instead of silently swallowing them
     if (browser) {
       await browser.close().catch((closeErr) =>
-        console.error(`   ⚠️  [${batchSize}] User ${userId} | browser.close() failed: ${closeErr.message}`)
+        console.error(`   ⚠️  [Batch ${batchSize}] User ${userId} | browser.close() failed: ${closeErr.message}`)
       );
     }
 
@@ -270,31 +259,18 @@ async function runSingleUser(userId, batchSize) {
   }
 }
 
-// ─── Run a single batch (chunked to respect MAX_CONCURRENT) ───────────────
-// FIX: Instead of firing all N browsers at once (OOM risk on GitHub Actions),
-// we split them into chunks of MAX_CONCURRENT and await each chunk before
-// launching the next. Total results are identical; RAM stays bounded.
+// ─── Run a single batch ───────────────────────────────────────────────────
+// Promise.all → كل اليوزرز بيبدأوا في نفس اللحظة بالظبط
 async function runBatch(size) {
   console.log(`\n${'='.repeat(80)}`);
-  console.log(`🔥 BATCH: ${size} CONCURRENT USERS (chunk size: ${MAX_CONCURRENT})`);
+  console.log(`🔥 BATCH: ${size} CONCURRENT USERS — كلهم بيبدأوا دلوقتي`);
   console.log(`${'='.repeat(80)}`);
 
   const startTime = Date.now();
-  const results   = [];
 
-  for (let offset = 0; offset < size; offset += MAX_CONCURRENT) {
-    const chunkSize = Math.min(MAX_CONCURRENT, size - offset);
-    const promises  = Array.from({ length: chunkSize }, (_, i) =>
-      runSingleUser(offset + i + 1, size)
-    );
-    const chunkResults = await Promise.all(promises);
-    results.push(...chunkResults);
-
-    // Brief pause between chunks to let OS reclaim memory
-    if (offset + chunkSize < size) {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
+  const results = await Promise.all(
+    Array.from({ length: size }, (_, i) => runSingleUser(i + 1, size))
+  );
 
   const batchDuration = (Date.now() - startTime) / 1000;
   const successful    = results.filter((r) => r.success);
@@ -379,11 +355,11 @@ function percentile(arr, p) {
 
 // ─── Health assessment ────────────────────────────────────────────────────
 function assessHealth(successRate, apiP95) {
-  if (successRate === 0)    return '💀 FAILED';
-  if (successRate < 50)     return '💀 OVERLOADED';
-  if (successRate < 80)     return '🔴 CRITICAL';
-  if (apiP95 > 20000)       return '🟠 DEGRADED';
-  if (apiP95 > 10000)       return '🟡 GOOD';
+  if (successRate === 0)  return '💀 FAILED';
+  if (successRate < 50)   return '💀 OVERLOADED';
+  if (successRate < 80)   return '🔴 CRITICAL';
+  if (apiP95 > 20000)     return '🟠 DEGRADED';
+  if (apiP95 > 10000)     return '🟡 GOOD';
   return '🟢 EXCELLENT';
 }
 
@@ -393,8 +369,7 @@ async function main() {
   console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
   console.log('📱 GitHub Actions | Stable Network');
   console.log('📱 Flow: Page Load → Upload → API → Copy');
-  console.log('📱 FULL TIMING INCLUDED');
-  console.log(`📱 Max concurrent browsers: ${MAX_CONCURRENT}`);
+  console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
   console.log('📱 ========================================\n');
 
   for (const size of BATCHES) {
@@ -403,13 +378,13 @@ async function main() {
 
     if (result.timings) {
       console.log(`\n   📊 Batch ${size} Results:`);
-      console.log(`   ✅ Success: ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
-      console.log(`   ⏱️  Wall Time: ${result.wallTime.toFixed(2)}s`);
-      console.log(`   📄 Page Load : avg ${(result.timings.pageLoad.avg  / 1000).toFixed(2)}s | p95 ${(result.timings.pageLoad.p95  / 1000).toFixed(2)}s`);
-      console.log(`   🔬 API       : avg ${(result.timings.api.avg       / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95       / 1000).toFixed(2)}s`);
-      console.log(`   📋 Journey   : avg ${(result.timings.journey.avg   / 1000).toFixed(2)}s | p95 ${(result.timings.journey.p95   / 1000).toFixed(2)}s`);
-      console.log(`   🎯 FULL TOTAL: avg ${(result.timings.full.avg      / 1000).toFixed(2)}s | p95 ${(result.timings.full.p95      / 1000).toFixed(2)}s`);
-      console.log(`   🏥 Health    : ${assessHealth(result.successRate, result.timings.api.p95)}`);
+      console.log(`   ✅ Success    : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
+      console.log(`   ⏱️  Wall Time  : ${result.wallTime.toFixed(2)}s`);
+      console.log(`   📄 Page Load  : avg ${(result.timings.pageLoad.avg / 1000).toFixed(2)}s | p95 ${(result.timings.pageLoad.p95 / 1000).toFixed(2)}s`);
+      console.log(`   🔬 API        : avg ${(result.timings.api.avg      / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95      / 1000).toFixed(2)}s`);
+      console.log(`   📋 Journey    : avg ${(result.timings.journey.avg  / 1000).toFixed(2)}s | p95 ${(result.timings.journey.p95  / 1000).toFixed(2)}s`);
+      console.log(`   🎯 FULL TOTAL : avg ${(result.timings.full.avg     / 1000).toFixed(2)}s | p95 ${(result.timings.full.p95     / 1000).toFixed(2)}s`);
+      console.log(`   🏥 Health     : ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
       if (result.errors?.length) {
@@ -418,9 +393,10 @@ async function main() {
       }
     }
 
+    // cool-down بين الـ batches
     if (BATCHES.indexOf(size) < BATCHES.length - 1) {
-      console.log('\n   ⏸️  Cooling down for 5 seconds...\n');
-      await new Promise((r) => setTimeout(r, 5000));
+      console.log('\n   ⏸️  Cooling down for 10 seconds...\n');
+      await new Promise((r) => setTimeout(r, 10000));
     }
   }
 
@@ -483,23 +459,14 @@ async function main() {
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 
   // ─── Executive Summary ────────────────────────────────────────────
-  // FIX: Removed misleading hardcoded fallback values.
-  // Now shows "> N" when all batches passed, or the exact failing batch.
-  const lastSafe     = allResults.filter((r) => r.successRate >= 90).pop();
+  const lastSafe      = allResults.filter((r) => r.successRate >= 90).pop();
   const firstOverload = allResults.find((r) => r.successRate < 50);
-  const lastBatch    = allResults.at(-1);
+  const lastBatch     = allResults.at(-1);
 
   console.log('📋 EXECUTIVE SUMMARY:');
   console.log('─'.repeat(89));
-  console.log(
-    `   ✅ Safe concurrent mobile users : ${lastSafe ? lastSafe.size : 'N/A'}`
-  );
-  console.log(
-    `   ⚠️  Performance degrades at      : ${lastSafe ? lastSafe.size + ' → watch next batch' : 'N/A'}`
-  );
-  console.log(
-    `   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`
-  );
+  console.log(`   ✅ Safe concurrent mobile users : ${lastSafe ? lastSafe.size : 'N/A'}`);
+  console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`);
   console.log('');
   console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy (complete user experience)');
   console.log('');
