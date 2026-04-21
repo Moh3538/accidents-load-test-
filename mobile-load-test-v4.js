@@ -1,14 +1,15 @@
-const { chromium } = require('playwright'); 
+const { chromium } = require('playwright');
 const fs = require('fs');
 
 /**
  * ================================================================
  *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST
- *  Flow: Page Load → Upload → API → Copy Chassis 
+ *  Flow: Page Load → Upload → API → Copy Chassis
  *  Runs on GitHub Actions (stable network, no VUH limits)
  *
  *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
  *  كل batch بتشغّل كل اليوزرز مع بعض في نفس اللحظة
+ *  Cooldown: 30s قبل batch 50 و 100 | 10s باقي الـ batches
  * ================================================================
  */
 
@@ -68,8 +69,13 @@ const TARGET_URL  = 'https://icarsu.com/accidents/';
 const API_TIMEOUT = 120000; // 2 minutes
 
 // ─── Test batches ─────────────────────────────────────────────────────────
-// كل رقم = عدد اليوزرز اللي بيشتغلوا مع بعض في نفس اللحظة
 const BATCHES = [5, 10, 15, 20, 50, 100];
+
+// ─── Cooldown config ──────────────────────────────────────────────────────
+// الـ batches اللي محتاجة 30 ثانية قبلها عشان الـ server يتعافى
+const LONG_COOLDOWN_BEFORE = [50, 100];
+const COOLDOWN_LONG        = 30000; // 30 seconds
+const COOLDOWN_SHORT       = 10000; // 10 seconds
 
 // Results storage
 const allResults = [];
@@ -260,7 +266,6 @@ async function runSingleUser(userId, batchSize) {
 }
 
 // ─── Run a single batch ───────────────────────────────────────────────────
-// Promise.all → كل اليوزرز بيبدأوا في نفس اللحظة بالظبط
 async function runBatch(size) {
   console.log(`\n${'='.repeat(80)}`);
   console.log(`🔥 BATCH: ${size} CONCURRENT USERS — كلهم بيبدأوا دلوقتي`);
@@ -370,9 +375,12 @@ async function main() {
   console.log('📱 GitHub Actions | Stable Network');
   console.log('📱 Flow: Page Load → Upload → API → Copy');
   console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
+  console.log('📱 Cooldown: 30s قبل batch 50 & 100 | 10s للباقي');
   console.log('📱 ========================================\n');
 
-  for (const size of BATCHES) {
+  for (let i = 0; i < BATCHES.length; i++) {
+    const size = BATCHES[i];
+
     const result = await runBatch(size);
     allResults.push(result);
 
@@ -393,10 +401,17 @@ async function main() {
       }
     }
 
-    // cool-down بين الـ batches
-    if (BATCHES.indexOf(size) < BATCHES.length - 1) {
-      console.log('\n   ⏸️  Cooling down for 10 seconds...\n');
-      await new Promise((r) => setTimeout(r, 10000));
+    // ─── Cooldown بين الـ batches ──────────────────────────────────
+    // 30 ثانية قبل batch 50 و 100 عشان الـ server يتعافى
+    // 10 ثواني للباقي
+    if (i < BATCHES.length - 1) {
+      const nextBatch    = BATCHES[i + 1];
+      const isLongPause  = LONG_COOLDOWN_BEFORE.includes(nextBatch);
+      const cooldown     = isLongPause ? COOLDOWN_LONG : COOLDOWN_SHORT;
+      const cooldownSecs = cooldown / 1000;
+
+      console.log(`\n   ⏸️  Cooling down for ${cooldownSecs}s before Batch ${nextBatch}...\n`);
+      await new Promise((r) => setTimeout(r, cooldown));
     }
   }
 
