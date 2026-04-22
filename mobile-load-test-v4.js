@@ -271,6 +271,9 @@ async function runSingleUser(userId, batchSize) {
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
 
+    // ✅ FIX: بداية الـ journey من هنا عشان يشمل وقت تجهيز الصفحة
+    const journeyStart = Date.now();
+
     // Wait for chassis element
     await page.waitForSelector('#chassisText', { timeout: 10000 }).catch(() => {});
 
@@ -280,9 +283,6 @@ async function runSingleUser(userId, batchSize) {
         return el?.innerText?.trim() ?? '';
       })
       .catch(() => '');
-
-    // ⏱️ JOURNEY TIMER - starts after page is ready
-    const journeyStart = Date.now();
 
     // ─── Step 1: Upload ───────────────────────────────────────────
     await uploadFile(page, imageFile);
@@ -527,7 +527,7 @@ async function main() {
   console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'}`}`);
   console.log('');
   console.log('   📌 FULL = Page Load + Upload + API + Copy');
-  console.log('   📌 Journey = Upload + API + Copy');
+  console.log('   📌 Journey = Upload + API + Copy + وقت تجهيز الصفحة');
   console.log('');
 }
 
