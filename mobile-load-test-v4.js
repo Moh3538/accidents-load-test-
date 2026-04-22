@@ -1,5 +1,3 @@
-'use strict';
-
 const { chromium } = require('playwright');
 const fs = require('fs');
 
@@ -12,12 +10,10 @@ const fs = require('fs');
  *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
  *  كل batch بتشغّل كل اليوزرز مع بعض في نفس اللحظة
  *  Cooldown: 30s قبل batch 50 و 100 | 10s باقي الـ batches
- *  
- *  REALISTIC: كل يوزر له browser مستقل + device مختلف + UA مختلف
  * ================================================================
  */
 
-// ─── Mobile devices pool with unique user agents ──────────────────────────
+// ─── Mobile devices pool ──────────────────────────────────────────────────
 const MOBILE_DEVICES = [
   {
     name: 'iPhone 14 Pro Max',
@@ -25,7 +21,6 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
   },
   {
     name: 'Samsung Galaxy S23',
@@ -33,7 +28,6 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
-    userAgent: 'Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
   },
   {
     name: 'Google Pixel 7',
@@ -41,7 +35,6 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 2.75,
     isMobile: true,
     hasTouch: true,
-    userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
   },
   {
     name: 'iPhone 13',
@@ -49,7 +42,6 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1',
   },
   {
     name: 'Samsung Galaxy S21',
@@ -57,35 +49,15 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
-    userAgent: 'Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
-  },
-  {
-    name: 'iPhone 12',
-    viewport: { width: 390, height: 844 },
-    deviceScaleFactor: 3,
-    isMobile: true,
-    hasTouch: true,
-    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Mobile/15E148 Safari/604.1',
-  },
-  {
-    name: 'OnePlus 11',
-    viewport: { width: 412, height: 915 },
-    deviceScaleFactor: 3.5,
-    isMobile: true,
-    hasTouch: true,
-    userAgent: 'Mozilla/5.0 (Linux; Android 13; OnePlus 11) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
-  },
-  {
-    name: 'Xiaomi 13',
-    viewport: { width: 393, height: 873 },
-    deviceScaleFactor: 3,
-    isMobile: true,
-    hasTouch: true,
-    userAgent: 'Mozilla/5.0 (Linux; Android 13; Xiaomi 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
   },
 ];
 
-// ─── Chassis images ──────────────────────────────────────────────────────
+const MOBILE_UA =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) ' +
+  'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
+  'Version/15.0 Mobile/15E148 Safari/604.1';
+
+// ─── Chassis images (must be in same folder) ──────────────────────────────
 const IMAGES = [
   './chassis1.jpg',  './chassis2.jpg',  './chassis3.jpg',
   './chassis4.jpg',  './chassis5.jpg',  './chassis6.jpg',
@@ -94,15 +66,16 @@ const IMAGES = [
 ];
 
 const TARGET_URL  = 'https://icarsu.com/accidents/';
-const API_TIMEOUT = 120000;
+const API_TIMEOUT = 120000; // 2 minutes
 
 // ─── Test batches ─────────────────────────────────────────────────────────
 const BATCHES = [5, 10, 15, 20, 50, 100];
 
 // ─── Cooldown config ──────────────────────────────────────────────────────
+// الـ batches اللي محتاجة 30 ثانية قبلها عشان الـ server يتعافى
 const LONG_COOLDOWN_BEFORE = [50, 100];
-const COOLDOWN_LONG        = 30000;
-const COOLDOWN_SHORT       = 10000;
+const COOLDOWN_LONG        = 30000; // 30 seconds
+const COOLDOWN_SHORT       = 10000; // 10 seconds
 
 // Results storage
 const allResults = [];
@@ -129,7 +102,7 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── Helper: Upload file ──────────────────────────────────────────────────
+// ─── Helper: Upload file with multiple selector attempts ──────────────────
 async function uploadFile(page, imageFile, timeoutMs = 30000) {
   const selectors = [
     'input[type="file"]',
@@ -150,6 +123,7 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
     }
   }
 
+  // Last resort – throws if it fails so the error propagates correctly
   await page.waitForSelector('input[type="file"]', {
     state: 'attached',
     timeout: timeoutMs,
@@ -162,66 +136,31 @@ async function clickCopyButton(page, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    try {
-      const copyBtn = page.locator('button, a, div[role="button"]').filter({
-        hasText: /Copy(\s*Chassis)?/i
-      }).first();
-      
-      if (await copyBtn.count() > 0) {
-        await copyBtn.click({ timeout: 2000 });
-        return;
-      }
-    } catch {
-      // Continue
-    }
+    const clicked = await page
+      .evaluate(() => {
+        const allElements = document.querySelectorAll(
+          'a, button, [role="button"], span, div'
+        );
 
-    const clicked = await page.evaluate(() => {
-      const elements = document.querySelectorAll(
-        'button, a, [role="button"], [onclick], .btn, .button, span[class*="copy"], div[class*="copy"]'
-      );
-      
-      for (const el of elements) {
-        const text = (el.innerText || el.textContent || '').toLowerCase();
-        const ariaLabel = el.getAttribute('aria-label') || '';
-        
-        if (
-          text.includes('copy chassis') ||
-          text.includes('copy') ||
-          text === 'نسخ' ||
-          text.includes('نسخ الشاصي') ||
-          ariaLabel.toLowerCase().includes('copy')
-        ) {
-          if (el.offsetParent !== null) {
-            el.click();
-            return true;
+        for (const el of allElements) {
+          const elText = el.innerText || el.textContent || '';
+
+          if (
+            (elText.includes('Copy') && elText.includes('Chassis')) ||
+            elText.trim() === 'Copy' ||
+            elText.includes('Copy Chassis')
+          ) {
+            if (el.offsetParent !== null) {
+              el.click();
+              return true;
+            }
           }
         }
-      }
-      
-      const icons = document.querySelectorAll('i, svg, img[alt*="copy"], [class*="fa-copy"]');
-      for (const icon of icons) {
-        const parent = icon.closest('button, a, [role="button"]');
-        if (parent && parent.offsetParent !== null) {
-          parent.click();
-          return true;
-        }
-      }
-      
-      return false;
-    }).catch(() => false);
+        return false;
+      })
+      .catch(() => false);
 
     if (clicked) return;
-    
-    try {
-      const xpathBtn = page.locator('//*[contains(text(), "Copy") or contains(text(), "نسخ")]').first();
-      if (await xpathBtn.count() > 0) {
-        await xpathBtn.click({ timeout: 1000 });
-        return;
-      }
-    } catch {
-      // Continue
-    }
-
     await page.waitForTimeout(300);
   }
 
@@ -237,7 +176,9 @@ async function runSingleUser(userId, batchSize) {
 
   const timings = {
     pageLoad:     0,
+    upload:       0,
     api:          0,
+    copy:         0,
     journeyTotal: 0,
     fullTotal:    0,
   };
@@ -254,28 +195,21 @@ async function runSingleUser(userId, batchSize) {
     });
 
     const context = await browser.newContext({
-      viewport: device.viewport,
-      deviceScaleFactor: device.deviceScaleFactor,
-      isMobile: device.isMobile,
-      hasTouch: device.hasTouch,
-      userAgent: device.userAgent,
+      ...device,
+      userAgent: MOBILE_UA,
     });
 
     const page = await context.newPage();
 
-    // ⏱️ FULL TIMER - starts at the very beginning
+    // ⏱️ FULL TIMER
     const fullStart = Date.now();
 
     // ─── Step 0: Page Load ────────────────────────────────────────
     const pageStart = Date.now();
-    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
 
-    // ✅ FIX: بداية الـ journey من هنا عشان يشمل وقت تجهيز الصفحة
-    const journeyStart = Date.now();
-
-    // Wait for chassis element
-    await page.waitForSelector('#chassisText', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(2000);
 
     const preChassis = await page
       .evaluate(() => {
@@ -284,8 +218,13 @@ async function runSingleUser(userId, batchSize) {
       })
       .catch(() => '');
 
+    // ⏱️ JOURNEY TIMER
+    const journeyStart = Date.now();
+
     // ─── Step 1: Upload ───────────────────────────────────────────
+    const uploadStart = Date.now();
     await uploadFile(page, imageFile);
+    timings.upload = Date.now() - uploadStart;
 
     // ─── Step 2: API Processing ───────────────────────────────────
     const apiStart     = Date.now();
@@ -293,31 +232,33 @@ async function runSingleUser(userId, batchSize) {
     timings.api        = Date.now() - apiStart;
 
     // ─── Step 3: Click Copy ───────────────────────────────────────
+    const copyStart = Date.now();
     await clickCopyButton(page, 10000);
+    timings.copy = Date.now() - copyStart;
 
-    // Calculate timings
     timings.journeyTotal = Date.now() - journeyStart;
     timings.fullTotal    = Date.now() - fullStart;
 
     console.log(
       `   ✅ [Batch ${batchSize}] User ${userId}` +
-      ` | ${device.name}` +
       ` | chassis: ${chassisFound.substring(0, 10)}...` +
       ` | page: ${(timings.pageLoad / 1000).toFixed(2)}s` +
       ` | api: ${(timings.api / 1000).toFixed(2)}s` +
-      ` | journey: ${(timings.journeyTotal / 1000).toFixed(2)}s` +
       ` | FULL: ${(timings.fullTotal / 1000).toFixed(2)}s`
     );
 
+    await page.waitForTimeout(1000);
     await browser.close();
 
-    return { success: true, userId, batchSize, timings, device: device.name };
+    return { success: true, userId, batchSize, timings };
 
   } catch (err) {
     console.error(`   ❌ [Batch ${batchSize}] User ${userId} | ${err.message}`);
 
     if (browser) {
-      await browser.close().catch(() => {});
+      await browser.close().catch((closeErr) =>
+        console.error(`   ⚠️  [Batch ${batchSize}] User ${userId} | browser.close() failed: ${closeErr.message}`)
+      );
     }
 
     return { success: false, userId, batchSize, error: err.message };
@@ -357,6 +298,8 @@ async function runBatch(size) {
   const apiTimes      = successful.map((r) => r.timings.api);
   const journeyTimes  = successful.map((r) => r.timings.journeyTotal);
   const fullTimes     = successful.map((r) => r.timings.fullTotal);
+  const uploadTimes   = successful.map((r) => r.timings.upload);
+  const copyTimes     = successful.map((r) => r.timings.copy);
 
   return {
     size,
@@ -371,11 +314,21 @@ async function runBatch(size) {
         max: Math.max(...pageLoadTimes),
         p95: percentile(pageLoadTimes, 95),
       },
+      upload: {
+        avg: avg(uploadTimes),
+        min: Math.min(...uploadTimes),
+        max: Math.max(...uploadTimes),
+        p95: percentile(uploadTimes, 95),
+      },
       api: {
         avg: avg(apiTimes),
         min: Math.min(...apiTimes),
         max: Math.max(...apiTimes),
         p95: percentile(apiTimes, 95),
+      },
+      copy: {
+        avg: avg(copyTimes),
+        p95: percentile(copyTimes, 95),
       },
       journey: {
         avg: avg(journeyTimes),
@@ -423,7 +376,6 @@ async function main() {
   console.log('📱 Flow: Page Load → Upload → API → Copy');
   console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
   console.log('📱 Cooldown: 30s قبل batch 50 & 100 | 10s للباقي');
-  console.log('📱 REALISTIC: Browser + Device + UA مختلف لكل يوزر');
   console.log('📱 ========================================\n');
 
   for (let i = 0; i < BATCHES.length; i++) {
@@ -437,9 +389,9 @@ async function main() {
       console.log(`   ✅ Success    : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
       console.log(`   ⏱️  Wall Time  : ${result.wallTime.toFixed(2)}s`);
       console.log(`   📄 Page Load  : avg ${(result.timings.pageLoad.avg / 1000).toFixed(2)}s | p95 ${(result.timings.pageLoad.p95 / 1000).toFixed(2)}s`);
-      console.log(`   🔬 API        : avg ${(result.timings.api.avg / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95 / 1000).toFixed(2)}s`);
-      console.log(`   📋 Journey    : avg ${(result.timings.journey.avg / 1000).toFixed(2)}s | p95 ${(result.timings.journey.p95 / 1000).toFixed(2)}s`);
-      console.log(`   🎯 FULL TOTAL : avg ${(result.timings.full.avg / 1000).toFixed(2)}s | p95 ${(result.timings.full.p95 / 1000).toFixed(2)}s`);
+      console.log(`   🔬 API        : avg ${(result.timings.api.avg      / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95      / 1000).toFixed(2)}s`);
+      console.log(`   📋 Journey    : avg ${(result.timings.journey.avg  / 1000).toFixed(2)}s | p95 ${(result.timings.journey.p95  / 1000).toFixed(2)}s`);
+      console.log(`   🎯 FULL TOTAL : avg ${(result.timings.full.avg     / 1000).toFixed(2)}s | p95 ${(result.timings.full.p95     / 1000).toFixed(2)}s`);
       console.log(`   🏥 Health     : ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
@@ -449,6 +401,9 @@ async function main() {
       }
     }
 
+    // ─── Cooldown بين الـ batches ──────────────────────────────────
+    // 30 ثانية قبل batch 50 و 100 عشان الـ server يتعافى
+    // 10 ثواني للباقي
     if (i < BATCHES.length - 1) {
       const nextBatch    = BATCHES[i + 1];
       const isLongPause  = LONG_COOLDOWN_BEFORE.includes(nextBatch);
@@ -466,19 +421,21 @@ async function main() {
     'PageLoad_avg_s,PageLoad_p95_s,' +
     'API_avg_s,API_p95_s,' +
     'Journey_avg_s,Journey_p95_s,' +
-    'FULL_avg_s,FULL_p95_s,Health\n';
+    'FULL_avg_s,FULL_p95_s,' +
+    'Upload_avg_s,Copy_avg_s,Health\n';
 
   allResults.forEach((r) => {
     if (r.timings) {
       csv +=
         `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},` +
         `${(r.timings.pageLoad.avg / 1000).toFixed(2)},${(r.timings.pageLoad.p95 / 1000).toFixed(2)},` +
-        `${(r.timings.api.avg / 1000).toFixed(2)},${(r.timings.api.p95 / 1000).toFixed(2)},` +
-        `${(r.timings.journey.avg / 1000).toFixed(2)},${(r.timings.journey.p95 / 1000).toFixed(2)},` +
-        `${(r.timings.full.avg / 1000).toFixed(2)},${(r.timings.full.p95 / 1000).toFixed(2)},` +
+        `${(r.timings.api.avg      / 1000).toFixed(2)},${(r.timings.api.p95      / 1000).toFixed(2)},` +
+        `${(r.timings.journey.avg  / 1000).toFixed(2)},${(r.timings.journey.p95  / 1000).toFixed(2)},` +
+        `${(r.timings.full.avg     / 1000).toFixed(2)},${(r.timings.full.p95     / 1000).toFixed(2)},` +
+        `${(r.timings.upload.avg   / 1000).toFixed(2)},${(r.timings.copy.avg     / 1000).toFixed(2)},` +
         `${assessHealth(r.successRate, r.timings.api.p95)}\n`;
     } else {
-      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,0,FAILED\n`;
+      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,0,0,0,FAILED\n`;
     }
   });
 
@@ -486,9 +443,9 @@ async function main() {
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
   // ─── Final Summary ────────────────────────────────────────────────
-  console.log('\n' + '='.repeat(100));
-  console.log('📊 FINAL REPORT');
-  console.log('='.repeat(100));
+  console.log('\n' + '='.repeat(120));
+  console.log('📊 FINAL REPORT (Page Load → Upload → API → Copy) - FULL TIMING');
+  console.log('='.repeat(120));
   console.log(
     'Users  │ Success │ Page (avg/p95)  │ API (avg/p95)  │ Journey (avg/p95)  │ FULL (avg/p95)  │ Health'
   );
@@ -501,9 +458,9 @@ async function main() {
       const users   = r.size.toString().padEnd(6);
       const success = `${r.success}/${r.total}`.padEnd(7);
       const page    = `${(r.timings.pageLoad.avg / 1000).toFixed(1)}/${(r.timings.pageLoad.p95 / 1000).toFixed(1)}s`.padEnd(15);
-      const api     = `${(r.timings.api.avg / 1000).toFixed(1)}/${(r.timings.api.p95 / 1000).toFixed(1)}s`.padEnd(14);
-      const journey = `${(r.timings.journey.avg / 1000).toFixed(1)}/${(r.timings.journey.p95 / 1000).toFixed(1)}s`.padEnd(18);
-      const full    = `${(r.timings.full.avg / 1000).toFixed(1)}/${(r.timings.full.p95 / 1000).toFixed(1)}s`.padEnd(15);
+      const api     = `${(r.timings.api.avg      / 1000).toFixed(1)}/${(r.timings.api.p95      / 1000).toFixed(1)}s`.padEnd(14);
+      const journey = `${(r.timings.journey.avg  / 1000).toFixed(1)}/${(r.timings.journey.p95  / 1000).toFixed(1)}s`.padEnd(18);
+      const full    = `${(r.timings.full.avg      / 1000).toFixed(1)}/${(r.timings.full.p95    / 1000).toFixed(1)}s`.padEnd(15);
       const health  = assessHealth(r.successRate, r.timings.api.p95);
       console.log(`${users} │ ${success} │ ${page} │ ${api} │ ${journey} │ ${full} │ ${health}`);
     } else {
@@ -513,7 +470,7 @@ async function main() {
     }
   });
 
-  console.log('='.repeat(100));
+  console.log('='.repeat(120));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 
   // ─── Executive Summary ────────────────────────────────────────────
@@ -522,12 +479,11 @@ async function main() {
   const lastBatch     = allResults.at(-1);
 
   console.log('📋 EXECUTIVE SUMMARY:');
-  console.log('─'.repeat(60));
+  console.log('─'.repeat(89));
   console.log(`   ✅ Safe concurrent mobile users : ${lastSafe ? lastSafe.size : 'N/A'}`);
-  console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'}`}`);
+  console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`);
   console.log('');
-  console.log('   📌 FULL = Page Load + Upload + API + Copy');
-  console.log('   📌 Journey = Upload + API + Copy + وقت تجهيز الصفحة');
+  console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy (complete user experience)');
   console.log('');
 }
 
