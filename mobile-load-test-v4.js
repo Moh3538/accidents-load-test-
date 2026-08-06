@@ -87,8 +87,8 @@ const BATCHES = [5, 10, 15, 20, 50, 100];
 
 // ─── Cooldown config ──────────────────────────────────────────────────────
 const LONG_COOLDOWN_BEFORE = [50, 100];
-const COOLDOWN_LONG        = 30000; // 30 seconds
-const COOLDOWN_SHORT       = 10000; // 10 seconds
+const COOLDOWN_LONG        = 60000; // 60 seconds (زودناها من 30 لضمان تصفية الطلبات العالقة)
+const COOLDOWN_SHORT       = 25000; // 25 seconds (زودناها من 10، أكبر من CURLOPT_TIMEOUT الجديد 20s)
 
 // ─── Diagnostics config ────────────────────────────────────────────────────
 const FAILURES_DIR = './failures';
@@ -139,26 +139,42 @@ async function saveFailureDiagnostics(page, userId, batchSize, reason) {
   }
 }
 
-// ─── Helper: Wait for chassis text to change ─────────────────────────────
-async function waitForChassisChange(page, before) {
+// ─── Helper: Wait for chassis text to change OR a reject/error message ────
+async function waitForChassisOutcome(page, before) {
   const deadline = Date.now() + API_TIMEOUT;
 
   while (Date.now() < deadline) {
-    const current = await page
+    const outcome = await page
       .evaluate(() => {
-        const el = document.getElementById('chassisText');
-        return el?.innerText?.trim() ?? '';
-      })
-      .catch(() => '');
+        const chassisEl = document.getElementById('chassisText');
+        const statusEl  = document.getElementById('uploadStatus');
 
-    if (current.length > 0 && current !== before) {
-      return current;
+        const chassisNow = chassisEl?.innerText?.trim() ?? '';
+        const statusText = statusEl?.innerText?.trim() ?? '';
+        const statusColor = statusEl ? getComputedStyle(statusEl).color : '';
+
+        return { chassisNow, statusText, statusColor };
+      })
+      .catch(() => ({ chassisNow: '', statusText: '', statusColor: '' }));
+
+    // الحالة 1: نجاح فعلي — الشاسيه اتغير
+    if (outcome.chassisNow.length > 0 && outcome.chassisNow !== before) {
+      return { type: 'success', value: outcome.chassisNow };
+    }
+
+    // الحالة 2: رفض واضح (busy / no chassis / أي رسالة حمراء)
+    // اللون الأحمر بييجي من showError() في الكود الأصلي (color: red)
+    if (
+      outcome.statusText &&
+      (outcome.statusColor.includes('255, 0, 0') || outcome.statusColor === 'red')
+    ) {
+      return { type: 'rejected', value: outcome.statusText };
     }
 
     await page.waitForTimeout(300);
   }
 
-  throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
+  throw new Error(`No outcome (success/reject) within ${API_TIMEOUT / 1000}s — server likely hung, not just busy`);
 }
 
 // ─── Helper: Upload file with multiple selector attempts ──────────────────
@@ -321,21 +337,42 @@ async function runSingleUser(userId, batchSize) {
     timings.upload = Date.now() - uploadStart;
 
     // ─── Step 2: API Processing ───────────────────────────────────
-    const apiStart     = Date.now();
-    const chassisFound = await waitForChassisChange(page, preChassis);
-    timings.api        = Date.now() - apiStart;
-
-    // ─── Step 3: Click Copy ───────────────────────────────────────
-    const copyStart = Date.now();
-    await clickCopyButton(page, 10000);
-    timings.copy = Date.now() - copyStart;
+    const apiStart = Date.now();
+    const outcome  = await waitForChassisOutcome(page, preChassis);
+    timings.api    = Date.now() - apiStart;
 
     timings.journeyTotal = Date.now() - journeyStart;
     timings.fullTotal    = Date.now() - fullStart;
 
+    if (outcome.type === 'rejected') {
+      console.log(
+        `   🟡 [Batch ${batchSize}] User ${userId}` +
+        ` | REJECTED (server responded, no chassis/busy): "${outcome.value}"` +
+        ` | api: ${(timings.api / 1000).toFixed(2)}s`
+      );
+
+      await page.waitForTimeout(500);
+      await browser.close();
+
+      // بيتحسب كـ "رد سليم من السيرفر" مش كـ crash/hang — نوع مختلف عن success
+      return {
+        success: false,
+        rejectedGracefully: true,
+        userId,
+        batchSize,
+        timings,
+        rejectReason: outcome.value,
+      };
+    }
+
+    // ─── Step 3: Click Copy (بس لو النتيجة نجاح فعلي) ──────────────
+    const copyStart = Date.now();
+    await clickCopyButton(page, 10000);
+    timings.copy = Date.now() - copyStart;
+
     console.log(
       `   ✅ [Batch ${batchSize}] User ${userId}` +
-      ` | chassis: ${chassisFound.substring(0, 10)}...` +
+      ` | chassis: ${outcome.value.substring(0, 10)}...` +
       ` | page: ${(timings.pageLoad / 1000).toFixed(2)}s` +
       ` | api: ${(timings.api / 1000).toFixed(2)}s` +
       ` | FULL: ${(timings.fullTotal / 1000).toFixed(2)}s`
@@ -388,8 +425,15 @@ async function runBatch(size) {
 
   const batchDuration = (Date.now() - startTime) / 1000;
   const successful    = results.filter((r) => r.success);
-  const failed        = results.filter((r) => !r.success);
+  const rejectedOk    = results.filter((r) => r.rejectedGracefully);
+  const failed        = results.filter((r) => !r.success && !r.rejectedGracefully);
   const cfBlocked     = failed.filter((r) => r.isCloudflareChallenge);
+
+  if (rejectedOk.length > 0) {
+    console.log(
+      `\n   🟡 ${rejectedOk.length}/${size} users were gracefully rejected by the server (busy/no-chassis) — this is a healthy safety response, NOT a crash.`
+    );
+  }
 
   if (cfBlocked.length > 0) {
     console.log(
@@ -423,6 +467,8 @@ async function runBatch(size) {
     success:     successful.length,
     total:       size,
     successRate: (successful.length / size) * 100,
+    rejectedGracefullyCount: rejectedOk.length,
+    healthyResponseRate: ((successful.length + rejectedOk.length) / size) * 100,
     wallTime:    batchDuration,
     cfBlockedCount: cfBlocked.length,
     timings: {
@@ -505,7 +551,11 @@ async function main() {
 
     if (result.timings) {
       console.log(`\n   📊 Batch ${size} Results:`);
-      console.log(`   ✅ Success    : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
+      console.log(`   ✅ True Success       : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
+      if (result.rejectedGracefullyCount > 0) {
+        console.log(`   🟡 Gracefully Rejected : ${result.rejectedGracefullyCount}/${result.total} (busy/no-chassis — server behaving correctly)`);
+        console.log(`   📈 Healthy Response Rate (success + graceful reject): ${result.healthyResponseRate.toFixed(1)}%`);
+      }
       if (result.cfBlockedCount > 0) {
         console.log(`   🛡️  Cloudflare-blocked : ${result.cfBlockedCount}/${result.total}`);
       }
