@@ -14,12 +14,13 @@ const fs = require('fs');
  *  Cooldown: 30s قبل batch 50 و 100 | 10s باقي الـ batches
  *
  *  التحسينات:
- *  ✓ كشف مبكر عن فشل OCR (blur/error) بدلاً من انتظار 120 ثانية
- *  ✓ كل مستخدم له متصفح مستقل + جهاز مختلف + User-Agent فريد
+ *  ✓ اكتشاف مبكر لفشل OCR (blur/error) بدلاً من انتظار 120s
+ *  ✓ متصفح مستقل + جهاز مختلف + User-Agent فريد لكل مستخدم
+ *  ✓ إعادة تحميل الصفحة مرة واحدة إذا لم يظهر زر الرفع (مهلة 60s)
  * ================================================================
  */
 
-// ─── مجموعة الأجهزة المحمولة مع User-Agent فريد لكل جهاز ─────────────────
+// ─── مجموعة الأجهزة المحمولة ───────────────────────────────────────────
 const MOBILE_DEVICES = [
   {
     name: 'iPhone 14 Pro Max',
@@ -63,7 +64,7 @@ const MOBILE_DEVICES = [
   },
 ];
 
-// ─── صور الشاسيه (يجب أن تكون في نفس المجلد) ─────────────────────────────
+// ─── صور الشاسيه ────────────────────────────────────────────────────────
 const IMAGES = [
   './chassis1.jpg',  './chassis2.jpg',  './chassis3.jpg',
   './chassis4.jpg',  './chassis5.jpg',  './chassis6.jpg',
@@ -72,25 +73,24 @@ const IMAGES = [
 ];
 
 const TARGET_URL  = 'https://icarsu.com/accidents/';
-const API_TIMEOUT = 120000; // دقيقتان كحد أقصى للـ OCR
+const API_TIMEOUT = 120000; // دقيقتان للـ OCR
 
 // ─── دفعات الاختبار ─────────────────────────────────────────────────────
 const BATCHES = [5, 10, 15, 20, 50, 100];
 
-// ─── إعدادات التهدئة بين الدفعات ────────────────────────────────────────
+// ─── التهدئة بين الدفعات ────────────────────────────────────────────────
 const LONG_COOLDOWN_BEFORE = [50, 100];
-const COOLDOWN_LONG        = 30000; // 30 ثانية
-const COOLDOWN_SHORT       = 10000; // 10 ثوان
+const COOLDOWN_LONG        = 30000;
+const COOLDOWN_SHORT       = 10000;
 
-// تخزين جميع النتائج
 const allResults = [];
 
-// ─── مساعد: انتظار تغير رقم الشاسيه (مع كشف مبكر عن الخطأ) ─────────────
+// ─── اكتشاف مبكر لفشل OCR ─────────────────────────────────────────────
 async function waitForChassisChange(page, before) {
   const deadline = Date.now() + API_TIMEOUT;
 
   while (Date.now() < deadline) {
-    // ✅ فحص مبكر لرسائل الخطأ
+    // فحص مبكر لرسائل الخطأ
     const errorMsg = await page.evaluate(() => {
       const blurEl = document.getElementById('blurMsg');
       if (blurEl && blurEl.style.display !== 'none' && blurEl.innerText.trim().length > 0) {
@@ -99,7 +99,6 @@ async function waitForChassisChange(page, before) {
       const statusEl = document.getElementById('uploadStatus');
       if (statusEl && statusEl.style.display !== 'none' && statusEl.innerText.trim().length > 0) {
         const text = statusEl.innerText.trim();
-        // إذا كان النص يحتوي على كلمات خطأ معروفة
         if (text.includes('blur') || text.includes('clear') || text.includes('not found') || text.includes('No chassis')) {
           return text;
         }
@@ -111,7 +110,7 @@ async function waitForChassisChange(page, before) {
       throw new Error(`OCR failed: ${errorMsg}`);
     }
 
-    // التحقق من تغير النص
+    // النص الطبيعي
     const current = await page.evaluate(() => {
       const el = document.getElementById('chassisText');
       return el?.innerText?.trim() ?? '';
@@ -127,8 +126,8 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── رفع الملف (محاولة عدة selectors) ──────────────────────────────────
-async function uploadFile(page, imageFile, timeoutMs = 30000) {
+// ─── رفع الملف مع إعادة المحاولة إذا لم يظهر العنصر ─────────────────────
+async function uploadFile(page, imageFile, timeoutMs = 60000) {
   const selectors = [
     'input[type="file"]',
     'input[id="regImage"]',
@@ -137,18 +136,36 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
     'input[type="file"][accept]',
   ];
 
+  // المحاولة الأولى
   for (const selector of selectors) {
     try {
       const fileInput = page.locator(selector).first();
-      await fileInput.waitFor({ state: 'attached', timeout: 5000 });
+      await fileInput.waitFor({ state: 'attached', timeout: timeoutMs });
       await fileInput.setInputFiles(imageFile);
       return;
     } catch {
-      // جرّب المحدد التالي
+      // جرب المحدد التالي
     }
   }
 
-  // المحاولة الأخيرة
+  // إذا فشلت كل المحاولات، أعد تحميل الصفحة وجرب مرة أخرى
+  console.log('   ⚠️  File input not found, retrying after page reload...');
+  await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
+  await page.waitForTimeout(3000);
+
+  // المحاولة الثانية بعد إعادة التحميل
+  for (const selector of selectors) {
+    try {
+      const fileInput = page.locator(selector).first();
+      await fileInput.waitFor({ state: 'attached', timeout: timeoutMs });
+      await fileInput.setInputFiles(imageFile);
+      return;
+    } catch {
+      // تابع
+    }
+  }
+
+  // المحاولة الأخيرة بالإنتظار المباشر
   await page.waitForSelector('input[type="file"]', {
     state: 'attached',
     timeout: timeoutMs,
@@ -156,34 +173,30 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
   await page.locator('input[type="file"]').first().setInputFiles(imageFile);
 }
 
-// ─── النقر على زر النسخ ────────────────────────────────────────────────
+// ─── النقر على Copy ────────────────────────────────────────────────────
 async function clickCopyButton(page, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const clicked = await page
-      .evaluate(() => {
-        const allElements = document.querySelectorAll(
-          'a, button, [role="button"], span, div'
-        );
-
-        for (const el of allElements) {
-          const elText = el.innerText || el.textContent || '';
-
-          if (
-            (elText.includes('Copy') && elText.includes('Chassis')) ||
-            elText.trim() === 'Copy' ||
-            elText.includes('Copy Chassis')
-          ) {
-            if (el.offsetParent !== null) {
-              el.click();
-              return true;
-            }
+    const clicked = await page.evaluate(() => {
+      const allElements = document.querySelectorAll(
+        'a, button, [role="button"], span, div'
+      );
+      for (const el of allElements) {
+        const elText = el.innerText || el.textContent || '';
+        if (
+          (elText.includes('Copy') && elText.includes('Chassis')) ||
+          elText.trim() === 'Copy' ||
+          elText.includes('Copy Chassis')
+        ) {
+          if (el.offsetParent !== null) {
+            el.click();
+            return true;
           }
         }
-        return false;
-      })
-      .catch(() => false);
+      }
+      return false;
+    }).catch(() => false);
 
     if (clicked) return;
     await page.waitForTimeout(300);
@@ -192,7 +205,7 @@ async function clickCopyButton(page, timeoutMs = 15000) {
   throw new Error(`Copy button not found within ${timeoutMs / 1000}s`);
 }
 
-// ─── رحلة المستخدم الواحد (متصفح مستقل، جهاز فريد) ─────────────────────
+// ─── رحلة المستخدم ─────────────────────────────────────────────────────
 async function runSingleUser(userId, batchSize) {
   let browser;
   const device    = MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
@@ -228,37 +241,35 @@ async function runSingleUser(userId, batchSize) {
 
     const page = await context.newPage();
 
-    // ⏱️ بداية المؤقت الكلي
+    // ⏱️ المؤقت الكلي
     const fullStart = Date.now();
 
-    // ── الخطوة 0: تحميل الصفحة ──────────────────────────────────
+    // ── تحميل الصفحة ──────────────────────────────────────────────
     const pageStart = Date.now();
     await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
 
     await page.waitForTimeout(2000);
 
-    const preChassis = await page
-      .evaluate(() => {
-        const el = document.getElementById('chassisText');
-        return el?.innerText?.trim() ?? '';
-      })
-      .catch(() => '');
+    const preChassis = await page.evaluate(() => {
+      const el = document.getElementById('chassisText');
+      return el?.innerText?.trim() ?? '';
+    }).catch(() => '');
 
-    // ⏱️ بداية رحلة المعالجة (Journey)
+    // ── بداية الرحلة ─────────────────────────────────────────────
     const journeyStart = Date.now();
 
-    // ── الخطوة 1: رفع الصورة ─────────────────────────────────────
+    // ── رفع الصورة (مع إعادة المحاولة التلقائية) ──────────────────
     const uploadStart = Date.now();
     await uploadFile(page, imageFile);
     timings.upload = Date.now() - uploadStart;
 
-    // ── الخطوة 2: معالجة الـ OCR ──────────────────────────────────
+    // ── معالجة OCR ────────────────────────────────────────────────
     const apiStart     = Date.now();
     const chassisFound = await waitForChassisChange(page, preChassis);
     timings.api        = Date.now() - apiStart;
 
-    // ── الخطوة 3: الضغط على Copy ──────────────────────────────────
+    // ── نسخ ───────────────────────────────────────────────────────
     const copyStart = Date.now();
     await clickCopyButton(page, 10000);
     timings.copy = Date.now() - copyStart;
@@ -291,7 +302,7 @@ async function runSingleUser(userId, batchSize) {
   }
 }
 
-// ─── تنفيذ دفعة واحدة ──────────────────────────────────────────────────
+// ─── تشغيل دفعة ─────────────────────────────────────────────────────────
 async function runBatch(size) {
   console.log(`\n${'='.repeat(80)}`);
   console.log(`🔥 BATCH: ${size} CONCURRENT USERS — كلهم بيبدأوا دلوقتي`);
@@ -373,7 +384,7 @@ async function runBatch(size) {
   };
 }
 
-// ─── دوال إحصائية ──────────────────────────────────────────────────────
+// ─── إحصائيات ───────────────────────────────────────────────────────────
 function avg(arr) {
   return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
@@ -384,7 +395,7 @@ function percentile(arr, p) {
   return sorted[Math.max(0, index)] ?? 0;
 }
 
-// ─── تقييم الحالة ──────────────────────────────────────────────────────
+// ─── تقييم الحالة ───────────────────────────────────────────────────────
 function assessHealth(successRate, apiP95) {
   if (successRate === 0)  return '💀 FAILED';
   if (successRate < 50)   return '💀 OVERLOADED';
@@ -394,7 +405,7 @@ function assessHealth(successRate, apiP95) {
   return '🟢 EXCELLENT';
 }
 
-// ─── الدالة الرئيسية ────────────────────────────────────────────────────
+// ─── الرئيسية ───────────────────────────────────────────────────────────
 async function main() {
   console.log('\n📱 ========================================');
   console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
@@ -403,11 +414,11 @@ async function main() {
   console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
   console.log('📱 Cooldown: 30s قبل batch 50 & 100 | 10s للباقي');
   console.log('📱 REALISTIC: متصفح + جهاز + UA مختلف لكل يوزر');
+  console.log('📱 مع إعادة تحميل الصفحة إذا تأخر عنصر الرفع');
   console.log('📱 ========================================\n');
 
   for (let i = 0; i < BATCHES.length; i++) {
     const size = BATCHES[i];
-
     const result = await runBatch(size);
     allResults.push(result);
 
@@ -428,19 +439,17 @@ async function main() {
       }
     }
 
-    // تهدئة بين الدفعات
+    // تهدئة
     if (i < BATCHES.length - 1) {
       const nextBatch    = BATCHES[i + 1];
       const isLongPause  = LONG_COOLDOWN_BEFORE.includes(nextBatch);
       const cooldown     = isLongPause ? COOLDOWN_LONG : COOLDOWN_SHORT;
-      const cooldownSecs = cooldown / 1000;
-
-      console.log(`\n   ⏸️  Cooling down for ${cooldownSecs}s before Batch ${nextBatch}...\n`);
+      console.log(`\n   ⏸️  Cooling down for ${cooldown / 1000}s before Batch ${nextBatch}...\n`);
       await new Promise((r) => setTimeout(r, cooldown));
     }
   }
 
-  // ─── تصدير تقرير CSV ─────────────────────────────────────────────
+  // ─── تصدير CSV ────────────────────────────────────────────────────────
   let csv =
     'Users,Success,SuccessRate,WallTime_s,' +
     'PageLoad_avg_s,PageLoad_p95_s,' +
@@ -467,7 +476,7 @@ async function main() {
   fs.writeFileSync('load-test-results.csv', csv);
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
-  // ─── التقرير النهائي ──────────────────────────────────────────────
+  // ─── التقرير النهائي ──────────────────────────────────────────────────
   console.log('\n' + '='.repeat(120));
   console.log('📊 FINAL REPORT (Page Load → Upload → API → Copy) - FULL TIMING');
   console.log('='.repeat(120));
@@ -498,7 +507,6 @@ async function main() {
   console.log('='.repeat(120));
   console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 
-  // ─── ملخص تنفيذي ─────────────────────────────────────────────────
   const lastSafe      = allResults.filter((r) => r.successRate >= 90).pop();
   const firstOverload = allResults.find((r) => r.successRate < 50);
   const lastBatch     = allResults.at(-1);
@@ -508,7 +516,8 @@ async function main() {
   console.log(`   ✅ Safe concurrent mobile users : ${lastSafe ? lastSafe.size : 'N/A'}`);
   console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`);
   console.log('');
-  console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy (complete user experience)');
+  console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy');
+  console.log('   📌 مع إعادة تحميل تلقائية للصفحة عند فشل ظهور عنصر الرفع');
   console.log('');
 }
 
