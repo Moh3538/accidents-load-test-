@@ -1,33 +1,25 @@
+'use strict';
+
 const { chromium } = require('playwright');
 const fs = require('fs');
-const path = require('path');
 
 /**
  * ================================================================
- *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST
+ *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST (محسّن)
  *  Flow: Page Load → Upload → API → Copy Chassis
- *  Runs on GitHub Actions (stable network, no VUH limits) 
+ *  Runs on GitHub Actions (stable network, no VUH limits)
  *
  *  BATCHES: 5, 10, 15, 20, 50, 100 concurrent users
  *  كل batch بتشغّل كل اليوزرز مع بعض في نفس اللحظة
  *  Cooldown: 30s قبل batch 50 و 100 | 10s باقي الـ batches
  *
- *  ---------------------------------------------------------------
- *  تحديث تشخيصي (Diagnostics update):
- *  ضفنا اكتشاف تلقائي لو الصفحة اللي رجعت هي صفحة "Cloudflare
- *  Challenge" بدل الصفحة الحقيقية. ده بيحصل غالباً تحت الضغط
- *  (concurrent requests كتير من نفس نطاق الـ IP بتاع GitHub Actions)
- *  وهو سبب شائع جداً لفشل "waiting for input[type=file]" حتى لو
- *  page.goto نفسه نجح من غير error.
- *
- *  كل يوزر فاشل دلوقتي بيتسجله:
- *  - هل كانت صفحة Cloudflare Challenge؟ (isCloudflareChallenge)
- *  - screenshot في مجلد ./failures
- *  - آخر جزء من الـ HTML في نفس المجلد
- *  ================================================================
+ *  التحسينات:
+ *  ✓ كشف مبكر عن فشل OCR (blur/error) بدلاً من انتظار 120 ثانية
+ *  ✓ كل مستخدم له متصفح مستقل + جهاز مختلف + User-Agent فريد
+ * ================================================================
  */
 
-// ─── Mobile devices pool ──────────────────────────────────────────────────
+// ─── مجموعة الأجهزة المحمولة مع User-Agent فريد لكل جهاز ─────────────────
 const MOBILE_DEVICES = [
   {
     name: 'iPhone 14 Pro Max',
@@ -35,6 +27,7 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1',
   },
   {
     name: 'Samsung Galaxy S23',
@@ -42,6 +35,7 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
+    userAgent: 'Mozilla/5.0 (Linux; Android 13; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
   },
   {
     name: 'Google Pixel 7',
@@ -49,6 +43,7 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 2.75,
     isMobile: true,
     hasTouch: true,
+    userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
   },
   {
     name: 'iPhone 13',
@@ -56,6 +51,7 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
+    userAgent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Mobile/15E148 Safari/604.1',
   },
   {
     name: 'Samsung Galaxy S21',
@@ -63,15 +59,11 @@ const MOBILE_DEVICES = [
     deviceScaleFactor: 3,
     isMobile: true,
     hasTouch: true,
+    userAgent: 'Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36',
   },
 ];
 
-const MOBILE_UA =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) ' +
-  'AppleWebKit/605.1.15 (KHTML, like Gecko) ' +
-  'Version/15.0 Mobile/15E148 Safari/604.1';
-
-// ─── Chassis images (must be in same folder) ──────────────────────────────
+// ─── صور الشاسيه (يجب أن تكون في نفس المجلد) ─────────────────────────────
 const IMAGES = [
   './chassis1.jpg',  './chassis2.jpg',  './chassis3.jpg',
   './chassis4.jpg',  './chassis5.jpg',  './chassis6.jpg',
@@ -80,104 +72,62 @@ const IMAGES = [
 ];
 
 const TARGET_URL  = 'https://icarsu.com/accidents/';
-const API_TIMEOUT = 120000; // 2 minutes
+const API_TIMEOUT = 120000; // دقيقتان كحد أقصى للـ OCR
 
-// ─── Test batches ─────────────────────────────────────────────────────────
+// ─── دفعات الاختبار ─────────────────────────────────────────────────────
 const BATCHES = [5, 10, 15, 20, 50, 100];
 
-// ─── Cooldown config ──────────────────────────────────────────────────────
+// ─── إعدادات التهدئة بين الدفعات ────────────────────────────────────────
 const LONG_COOLDOWN_BEFORE = [50, 100];
-const COOLDOWN_LONG        = 60000; // 60 seconds (زودناها من 30 لضمان تصفية الطلبات العالقة)
-const COOLDOWN_SHORT       = 25000; // 25 seconds (زودناها من 10، أكبر من CURLOPT_TIMEOUT الجديد 20s)
+const COOLDOWN_LONG        = 30000; // 30 ثانية
+const COOLDOWN_SHORT       = 10000; // 10 ثوان
 
-// ─── Diagnostics config ────────────────────────────────────────────────────
-const FAILURES_DIR = './failures';
-if (!fs.existsSync(FAILURES_DIR)) {
-  fs.mkdirSync(FAILURES_DIR, { recursive: true });
-}
-
-// نصوص/علامات معروفة لصفحات Cloudflare Challenge
-const CF_CHALLENGE_MARKERS = [
-  'Enable JavaScript and cookies to continue',
-  'Checking if the site connection is secure',
-  'cf-mitigated',
-  'challenges.cloudflare.com',
-  'Just a moment',
-  'cdn-cgi/challenge-platform',
-];
-
-// Results storage
+// تخزين جميع النتائج
 const allResults = [];
 
-// ─── Helper: detect Cloudflare challenge page ─────────────────────────────
-async function detectCloudflareChallenge(page) {
-  try {
-    const html = await page.content();
-    const lower = html.toLowerCase();
-    const hit = CF_CHALLENGE_MARKERS.find((marker) =>
-      lower.includes(marker.toLowerCase())
-    );
-    return { isChallenge: !!hit, marker: hit || null, htmlSnippet: html.slice(0, 2000) };
-  } catch {
-    return { isChallenge: false, marker: null, htmlSnippet: '' };
-  }
-}
-
-// ─── Helper: save diagnostics on failure ──────────────────────────────────
-async function saveFailureDiagnostics(page, userId, batchSize, reason) {
-  const base = path.join(FAILURES_DIR, `batch${batchSize}_user${userId}`);
-  try {
-    await page.screenshot({ path: `${base}.png`, fullPage: true }).catch(() => {});
-    const html = await page.content().catch(() => '');
-    fs.writeFileSync(`${base}.html`, html || '(no html captured)');
-    fs.writeFileSync(
-      `${base}.reason.txt`,
-      `Reason: ${reason}\nURL at failure: ${page.url()}\n`
-    );
-  } catch (e) {
-    console.error(`   ⚠️ Failed to save diagnostics for user ${userId}: ${e.message}`);
-  }
-}
-
-// ─── Helper: Wait for chassis text to change OR a reject/error message ────
-async function waitForChassisOutcome(page, before) {
+// ─── مساعد: انتظار تغير رقم الشاسيه (مع كشف مبكر عن الخطأ) ─────────────
+async function waitForChassisChange(page, before) {
   const deadline = Date.now() + API_TIMEOUT;
 
   while (Date.now() < deadline) {
-    const outcome = await page
-      .evaluate(() => {
-        const chassisEl = document.getElementById('chassisText');
-        const statusEl  = document.getElementById('uploadStatus');
+    // ✅ فحص مبكر لرسائل الخطأ
+    const errorMsg = await page.evaluate(() => {
+      const blurEl = document.getElementById('blurMsg');
+      if (blurEl && blurEl.style.display !== 'none' && blurEl.innerText.trim().length > 0) {
+        return blurEl.innerText.trim();
+      }
+      const statusEl = document.getElementById('uploadStatus');
+      if (statusEl && statusEl.style.display !== 'none' && statusEl.innerText.trim().length > 0) {
+        const text = statusEl.innerText.trim();
+        // إذا كان النص يحتوي على كلمات خطأ معروفة
+        if (text.includes('blur') || text.includes('clear') || text.includes('not found') || text.includes('No chassis')) {
+          return text;
+        }
+      }
+      return null;
+    }).catch(() => null);
 
-        const chassisNow = chassisEl?.innerText?.trim() ?? '';
-        const statusText = statusEl?.innerText?.trim() ?? '';
-        const statusColor = statusEl ? getComputedStyle(statusEl).color : '';
-
-        return { chassisNow, statusText, statusColor };
-      })
-      .catch(() => ({ chassisNow: '', statusText: '', statusColor: '' }));
-
-    // الحالة 1: نجاح فعلي — الشاسيه اتغير
-    if (outcome.chassisNow.length > 0 && outcome.chassisNow !== before) {
-      return { type: 'success', value: outcome.chassisNow };
+    if (errorMsg) {
+      throw new Error(`OCR failed: ${errorMsg}`);
     }
 
-    // الحالة 2: رفض واضح (busy / no chassis / أي رسالة حمراء)
-    // اللون الأحمر بييجي من showError() في الكود الأصلي (color: red)
-    if (
-      outcome.statusText &&
-      (outcome.statusColor.includes('255, 0, 0') || outcome.statusColor === 'red')
-    ) {
-      return { type: 'rejected', value: outcome.statusText };
+    // التحقق من تغير النص
+    const current = await page.evaluate(() => {
+      const el = document.getElementById('chassisText');
+      return el?.innerText?.trim() ?? '';
+    }).catch(() => '');
+
+    if (current.length > 0 && current !== before) {
+      return current;
     }
 
     await page.waitForTimeout(300);
   }
 
-  throw new Error(`No outcome (success/reject) within ${API_TIMEOUT / 1000}s — server likely hung, not just busy`);
+  throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── Helper: Upload file with multiple selector attempts ──────────────────
+// ─── رفع الملف (محاولة عدة selectors) ──────────────────────────────────
 async function uploadFile(page, imageFile, timeoutMs = 30000) {
   const selectors = [
     'input[type="file"]',
@@ -194,11 +144,11 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
       await fileInput.setInputFiles(imageFile);
       return;
     } catch {
-      // try next selector
+      // جرّب المحدد التالي
     }
   }
 
-  // Last resort – throws if it fails so the error propagates correctly
+  // المحاولة الأخيرة
   await page.waitForSelector('input[type="file"]', {
     state: 'attached',
     timeout: timeoutMs,
@@ -206,7 +156,7 @@ async function uploadFile(page, imageFile, timeoutMs = 30000) {
   await page.locator('input[type="file"]').first().setInputFiles(imageFile);
 }
 
-// ─── Helper: Click Copy button ────────────────────────────────────────────
+// ─── النقر على زر النسخ ────────────────────────────────────────────────
 async function clickCopyButton(page, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
 
@@ -242,11 +192,9 @@ async function clickCopyButton(page, timeoutMs = 15000) {
   throw new Error(`Copy button not found within ${timeoutMs / 1000}s`);
 }
 
-// ─── Single user journey ──────────────────────────────────────────────────
+// ─── رحلة المستخدم الواحد (متصفح مستقل، جهاز فريد) ─────────────────────
 async function runSingleUser(userId, batchSize) {
   let browser;
-  let page;
-
   const device    = MOBILE_DEVICES[Math.floor(Math.random() * MOBILE_DEVICES.length)];
   const imageFile = IMAGES[(userId - 1) % IMAGES.length];
 
@@ -271,35 +219,24 @@ async function runSingleUser(userId, batchSize) {
     });
 
     const context = await browser.newContext({
-      ...device,
-      userAgent: MOBILE_UA,
+      viewport: device.viewport,
+      deviceScaleFactor: device.deviceScaleFactor,
+      isMobile: device.isMobile,
+      hasTouch: device.hasTouch,
+      userAgent: device.userAgent,
     });
 
-    page = await context.newPage();
+    const page = await context.newPage();
 
-    // ⏱️ FULL TIMER
+    // ⏱️ بداية المؤقت الكلي
     const fullStart = Date.now();
 
-    // ─── Step 0: Page Load ────────────────────────────────────────
+    // ── الخطوة 0: تحميل الصفحة ──────────────────────────────────
     const pageStart = Date.now();
     await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60000 });
     timings.pageLoad = Date.now() - pageStart;
 
     await page.waitForTimeout(2000);
-
-    // ─── فحص فوري: هل الصفحة اللي وصلت هي Cloudflare Challenge؟ ────
-    const cfCheck = await detectCloudflareChallenge(page);
-    if (cfCheck.isChallenge) {
-      await saveFailureDiagnostics(
-        page,
-        userId,
-        batchSize,
-        `Cloudflare challenge detected (marker: "${cfCheck.marker}")`
-      );
-      throw new Error(
-        `CLOUDFLARE_CHALLENGE: page served a Cloudflare challenge instead of real content (marker: "${cfCheck.marker}")`
-      );
-    }
 
     const preChassis = await page
       .evaluate(() => {
@@ -308,71 +245,31 @@ async function runSingleUser(userId, batchSize) {
       })
       .catch(() => '');
 
-    // ⏱️ JOURNEY TIMER
+    // ⏱️ بداية رحلة المعالجة (Journey)
     const journeyStart = Date.now();
 
-    // ─── Step 1: Upload ───────────────────────────────────────────
+    // ── الخطوة 1: رفع الصورة ─────────────────────────────────────
     const uploadStart = Date.now();
-    try {
-      await uploadFile(page, imageFile);
-    } catch (uploadErr) {
-      // نتأكد تاني وقت الفشل هل بقت الصفحة challenge (ممكن يحصل
-      // في نص الطريق لو Cloudflare اتفعل بعد اللودينج الأولي)
-      const cfCheckAtFail = await detectCloudflareChallenge(page);
-      await saveFailureDiagnostics(
-        page,
-        userId,
-        batchSize,
-        cfCheckAtFail.isChallenge
-          ? `CLOUDFLARE_CHALLENGE at upload step (marker: "${cfCheckAtFail.marker}")`
-          : `upload step failed: ${uploadErr.message}`
-      );
-      if (cfCheckAtFail.isChallenge) {
-        throw new Error(
-          `CLOUDFLARE_CHALLENGE: file input never appeared because Cloudflare served a challenge page (marker: "${cfCheckAtFail.marker}")`
-        );
-      }
-      throw uploadErr;
-    }
+    await uploadFile(page, imageFile);
     timings.upload = Date.now() - uploadStart;
 
-    // ─── Step 2: API Processing ───────────────────────────────────
-    const apiStart = Date.now();
-    const outcome  = await waitForChassisOutcome(page, preChassis);
-    timings.api    = Date.now() - apiStart;
+    // ── الخطوة 2: معالجة الـ OCR ──────────────────────────────────
+    const apiStart     = Date.now();
+    const chassisFound = await waitForChassisChange(page, preChassis);
+    timings.api        = Date.now() - apiStart;
 
-    timings.journeyTotal = Date.now() - journeyStart;
-    timings.fullTotal    = Date.now() - fullStart;
-
-    if (outcome.type === 'rejected') {
-      console.log(
-        `   🟡 [Batch ${batchSize}] User ${userId}` +
-        ` | REJECTED (server responded, no chassis/busy): "${outcome.value}"` +
-        ` | api: ${(timings.api / 1000).toFixed(2)}s`
-      );
-
-      await page.waitForTimeout(500);
-      await browser.close();
-
-      // بيتحسب كـ "رد سليم من السيرفر" مش كـ crash/hang — نوع مختلف عن success
-      return {
-        success: false,
-        rejectedGracefully: true,
-        userId,
-        batchSize,
-        timings,
-        rejectReason: outcome.value,
-      };
-    }
-
-    // ─── Step 3: Click Copy (بس لو النتيجة نجاح فعلي) ──────────────
+    // ── الخطوة 3: الضغط على Copy ──────────────────────────────────
     const copyStart = Date.now();
     await clickCopyButton(page, 10000);
     timings.copy = Date.now() - copyStart;
 
+    timings.journeyTotal = Date.now() - journeyStart;
+    timings.fullTotal    = Date.now() - fullStart;
+
     console.log(
       `   ✅ [Batch ${batchSize}] User ${userId}` +
-      ` | chassis: ${outcome.value.substring(0, 10)}...` +
+      ` | device: ${device.name}` +
+      ` | chassis: ${chassisFound.substring(0, 10)}...` +
       ` | page: ${(timings.pageLoad / 1000).toFixed(2)}s` +
       ` | api: ${(timings.api / 1000).toFixed(2)}s` +
       ` | FULL: ${(timings.fullTotal / 1000).toFixed(2)}s`
@@ -384,34 +281,17 @@ async function runSingleUser(userId, batchSize) {
     return { success: true, userId, batchSize, timings };
 
   } catch (err) {
-    const isCfChallenge = err.message.startsWith('CLOUDFLARE_CHALLENGE');
-
-    console.error(
-      `   ❌ [Batch ${batchSize}] User ${userId} | ${isCfChallenge ? '🛡️ CLOUDFLARE CHALLENGE' : 'ERROR'} | ${err.message}`
-    );
-
-    // لو حصل error عادي (مش challenge) وكان عندنا الصفحة، نسجل diagnostics برضو
-    if (page && !isCfChallenge) {
-      await saveFailureDiagnostics(page, userId, batchSize, err.message).catch(() => {});
-    }
+    console.error(`   ❌ [Batch ${batchSize}] User ${userId} | ${err.message}`);
 
     if (browser) {
-      await browser.close().catch((closeErr) =>
-        console.error(`   ⚠️  [Batch ${batchSize}] User ${userId} | browser.close() failed: ${closeErr.message}`)
-      );
+      await browser.close().catch(() => {});
     }
 
-    return {
-      success: false,
-      userId,
-      batchSize,
-      error: err.message,
-      isCloudflareChallenge: isCfChallenge,
-    };
+    return { success: false, userId, batchSize, error: err.message };
   }
 }
 
-// ─── Run a single batch ───────────────────────────────────────────────────
+// ─── تنفيذ دفعة واحدة ──────────────────────────────────────────────────
 async function runBatch(size) {
   console.log(`\n${'='.repeat(80)}`);
   console.log(`🔥 BATCH: ${size} CONCURRENT USERS — كلهم بيبدأوا دلوقتي`);
@@ -425,21 +305,7 @@ async function runBatch(size) {
 
   const batchDuration = (Date.now() - startTime) / 1000;
   const successful    = results.filter((r) => r.success);
-  const rejectedOk    = results.filter((r) => r.rejectedGracefully);
-  const failed        = results.filter((r) => !r.success && !r.rejectedGracefully);
-  const cfBlocked     = failed.filter((r) => r.isCloudflareChallenge);
-
-  if (rejectedOk.length > 0) {
-    console.log(
-      `\n   🟡 ${rejectedOk.length}/${size} users were gracefully rejected by the server (busy/no-chassis) — this is a healthy safety response, NOT a crash.`
-    );
-  }
-
-  if (cfBlocked.length > 0) {
-    console.log(
-      `\n   🛡️  ${cfBlocked.length}/${size} users were blocked by a Cloudflare challenge (not a code/server issue).`
-    );
-  }
+  const failed        = results.filter((r) => !r.success);
 
   if (successful.length === 0) {
     console.log(`\n   ❌ ALL ${size} USERS FAILED`);
@@ -450,7 +316,6 @@ async function runBatch(size) {
       successRate: 0,
       wallTime:    batchDuration,
       timings:     null,
-      cfBlockedCount: cfBlocked.length,
       errors:      failed.slice(0, 3).map((f) => f.error),
     };
   }
@@ -467,10 +332,7 @@ async function runBatch(size) {
     success:     successful.length,
     total:       size,
     successRate: (successful.length / size) * 100,
-    rejectedGracefullyCount: rejectedOk.length,
-    healthyResponseRate: ((successful.length + rejectedOk.length) / size) * 100,
     wallTime:    batchDuration,
-    cfBlockedCount: cfBlocked.length,
     timings: {
       pageLoad: {
         avg: avg(pageLoadTimes),
@@ -511,7 +373,7 @@ async function runBatch(size) {
   };
 }
 
-// ─── Statistics helpers ───────────────────────────────────────────────────
+// ─── دوال إحصائية ──────────────────────────────────────────────────────
 function avg(arr) {
   return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
@@ -522,7 +384,7 @@ function percentile(arr, p) {
   return sorted[Math.max(0, index)] ?? 0;
 }
 
-// ─── Health assessment ────────────────────────────────────────────────────
+// ─── تقييم الحالة ──────────────────────────────────────────────────────
 function assessHealth(successRate, apiP95) {
   if (successRate === 0)  return '💀 FAILED';
   if (successRate < 50)   return '💀 OVERLOADED';
@@ -532,7 +394,7 @@ function assessHealth(successRate, apiP95) {
   return '🟢 EXCELLENT';
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────
+// ─── الدالة الرئيسية ────────────────────────────────────────────────────
 async function main() {
   console.log('\n📱 ========================================');
   console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
@@ -540,7 +402,7 @@ async function main() {
   console.log('📱 Flow: Page Load → Upload → API → Copy');
   console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
   console.log('📱 Cooldown: 30s قبل batch 50 & 100 | 10s للباقي');
-  console.log('📱 Diagnostics: screenshots + html للفشل في ./failures');
+  console.log('📱 REALISTIC: متصفح + جهاز + UA مختلف لكل يوزر');
   console.log('📱 ========================================\n');
 
   for (let i = 0; i < BATCHES.length; i++) {
@@ -551,14 +413,7 @@ async function main() {
 
     if (result.timings) {
       console.log(`\n   📊 Batch ${size} Results:`);
-      console.log(`   ✅ True Success       : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
-      if (result.rejectedGracefullyCount > 0) {
-        console.log(`   🟡 Gracefully Rejected : ${result.rejectedGracefullyCount}/${result.total} (busy/no-chassis — server behaving correctly)`);
-        console.log(`   📈 Healthy Response Rate (success + graceful reject): ${result.healthyResponseRate.toFixed(1)}%`);
-      }
-      if (result.cfBlockedCount > 0) {
-        console.log(`   🛡️  Cloudflare-blocked : ${result.cfBlockedCount}/${result.total}`);
-      }
+      console.log(`   ✅ Success    : ${result.success}/${result.total} (${result.successRate.toFixed(1)}%)`);
       console.log(`   ⏱️  Wall Time  : ${result.wallTime.toFixed(2)}s`);
       console.log(`   📄 Page Load  : avg ${(result.timings.pageLoad.avg / 1000).toFixed(2)}s | p95 ${(result.timings.pageLoad.p95 / 1000).toFixed(2)}s`);
       console.log(`   🔬 API        : avg ${(result.timings.api.avg      / 1000).toFixed(2)}s | p95 ${(result.timings.api.p95      / 1000).toFixed(2)}s`);
@@ -567,16 +422,13 @@ async function main() {
       console.log(`   🏥 Health     : ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n   ❌ Batch ${size}: ALL FAILED`);
-      if (result.cfBlockedCount > 0) {
-        console.log(`   🛡️  ${result.cfBlockedCount}/${result.total} were Cloudflare challenges (check Cloudflare rules, not app code)`);
-      }
       if (result.errors?.length) {
         console.log('   📋 Sample errors:');
         result.errors.slice(0, 3).forEach((e) => console.log(`      - ${e}`));
       }
     }
 
-    // ─── Cooldown بين الـ batches ──────────────────────────────────
+    // تهدئة بين الدفعات
     if (i < BATCHES.length - 1) {
       const nextBatch    = BATCHES[i + 1];
       const isLongPause  = LONG_COOLDOWN_BEFORE.includes(nextBatch);
@@ -588,9 +440,9 @@ async function main() {
     }
   }
 
-  // ─── Generate CSV Report ──────────────────────────────────────────
+  // ─── تصدير تقرير CSV ─────────────────────────────────────────────
   let csv =
-    'Users,Success,SuccessRate,WallTime_s,CloudflareBlocked,' +
+    'Users,Success,SuccessRate,WallTime_s,' +
     'PageLoad_avg_s,PageLoad_p95_s,' +
     'API_avg_s,API_p95_s,' +
     'Journey_avg_s,Journey_p95_s,' +
@@ -600,7 +452,7 @@ async function main() {
   allResults.forEach((r) => {
     if (r.timings) {
       csv +=
-        `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},${r.cfBlockedCount || 0},` +
+        `${r.size},${r.success}/${r.total},${r.successRate.toFixed(1)}%,${r.wallTime.toFixed(2)},` +
         `${(r.timings.pageLoad.avg / 1000).toFixed(2)},${(r.timings.pageLoad.p95 / 1000).toFixed(2)},` +
         `${(r.timings.api.avg      / 1000).toFixed(2)},${(r.timings.api.p95      / 1000).toFixed(2)},` +
         `${(r.timings.journey.avg  / 1000).toFixed(2)},${(r.timings.journey.p95  / 1000).toFixed(2)},` +
@@ -608,14 +460,14 @@ async function main() {
         `${(r.timings.upload.avg   / 1000).toFixed(2)},${(r.timings.copy.avg     / 1000).toFixed(2)},` +
         `${assessHealth(r.successRate, r.timings.api.p95)}\n`;
     } else {
-      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},${r.cfBlockedCount || 0},0,0,0,0,0,0,0,0,0,0,FAILED\n`;
+      csv += `${r.size},0/${r.total},0%,${r.wallTime.toFixed(2)},0,0,0,0,0,0,0,0,0,0,FAILED\n`;
     }
   });
 
   fs.writeFileSync('load-test-results.csv', csv);
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
-  // ─── Final Summary ────────────────────────────────────────────────
+  // ─── التقرير النهائي ──────────────────────────────────────────────
   console.log('\n' + '='.repeat(120));
   console.log('📊 FINAL REPORT (Page Load → Upload → API → Copy) - FULL TIMING');
   console.log('='.repeat(120));
@@ -644,29 +496,17 @@ async function main() {
   });
 
   console.log('='.repeat(120));
-  console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json');
-  console.log('📝 Failure diagnostics (screenshots + html) saved to: ./failures\n');
+  console.log('\n📝 Results saved to: load-test-results.csv, load-test-results.json\n');
 
-  // ─── Executive Summary ────────────────────────────────────────────
+  // ─── ملخص تنفيذي ─────────────────────────────────────────────────
   const lastSafe      = allResults.filter((r) => r.successRate >= 90).pop();
   const firstOverload = allResults.find((r) => r.successRate < 50);
   const lastBatch     = allResults.at(-1);
-  const totalCfBlocked = allResults.reduce((sum, r) => sum + (r.cfBlockedCount || 0), 0);
 
   console.log('📋 EXECUTIVE SUMMARY:');
   console.log('─'.repeat(89));
   console.log(`   ✅ Safe concurrent mobile users : ${lastSafe ? lastSafe.size : 'N/A'}`);
   console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`);
-  console.log(`   🛡️  Total Cloudflare-blocked users : ${totalCfBlocked}`);
-  if (totalCfBlocked > 0) {
-    console.log(
-      '   ⚠️  ملحوظة: أي فشل بسبب Cloudflare مش دليل على مشكلة في الكود أو السيرفر —'
-    );
-    console.log(
-      '      محتاج تظبط قواعد الـ WAF/Bot Fight Mode في Cloudflare عشان تسمح بحركة GitHub Actions,'
-    );
-    console.log('      أو تختبر من IP/شبكة مختلفة مش cloud/datacenter.');
-  }
   console.log('');
   console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy (complete user experience)');
   console.log('');
