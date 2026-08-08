@@ -5,7 +5,7 @@ const fs = require('fs');
 
 /**
  * ================================================================
- *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST (محسّن)
+ *  iCarsU.com  –  PLAYWRIGHT BROWSER LOAD TEST (FINAL)
  *  Flow: Page Load → Upload → API → Copy Chassis
  *  Runs on GitHub Actions (stable network, no VUH limits)
  *
@@ -13,10 +13,11 @@ const fs = require('fs');
  *  كل batch بتشغّل كل اليوزرز مع بعض في نفس اللحظة
  *  Cooldown: 30s قبل batch 50 و 100 | 10s باقي الـ batches
  *
- *  التحسينات:
+ *  الميزات:
  *  ✓ اكتشاف مبكر لفشل OCR (blur/error) بدلاً من انتظار 120s
  *  ✓ متصفح مستقل + جهاز مختلف + User-Agent فريد لكل مستخدم
- *  ✓ إعادة تحميل الصفحة مرة واحدة إذا لم يظهر زر الرفع (مهلة 60s)
+ *  ✓ فشل سريع إذا لم يظهر زر الرفع (15 ثانية فقط)
+ *  ✓ التحقق من صحة رقم الشاسيه (VIN) قبل اعتباره ناجحاً
  * ================================================================
  */
 
@@ -73,7 +74,7 @@ const IMAGES = [
 ];
 
 const TARGET_URL  = 'https://icarsu.com/accidents/';
-const API_TIMEOUT = 120000; // دقيقتان للـ OCR
+const API_TIMEOUT = 120000; // دقيقتان للـ OCR (احتياطي فقط)
 
 // ─── دفعات الاختبار ─────────────────────────────────────────────────────
 const BATCHES = [5, 10, 15, 20, 50, 100];
@@ -84,6 +85,12 @@ const COOLDOWN_LONG        = 30000;
 const COOLDOWN_SHORT       = 10000;
 
 const allResults = [];
+
+// ─── التحقق من صحة رقم الشاسيه (VIN) ────────────────────────────────────
+function isValidVIN(vin) {
+  // يجب أن يكون 17 حرفاً (أحرف كبيرة وأرقام، بدون I,O,Q)
+  return /^[A-HJ-NPR-Z0-9]{17}$/.test(vin);
+}
 
 // ─── اكتشاف مبكر لفشل OCR ─────────────────────────────────────────────
 async function waitForChassisChange(page, before) {
@@ -110,13 +117,17 @@ async function waitForChassisChange(page, before) {
       throw new Error(`OCR failed: ${errorMsg}`);
     }
 
-    // النص الطبيعي
+    // النص الحالي في حقل الشاسيه
     const current = await page.evaluate(() => {
       const el = document.getElementById('chassisText');
       return el?.innerText?.trim() ?? '';
     }).catch(() => '');
 
+    // إذا تغير النص وكان شاسيه صحيح
     if (current.length > 0 && current !== before) {
+      if (!isValidVIN(current)) {
+        throw new Error(`OCR returned invalid VIN: "${current}"`);
+      }
       return current;
     }
 
@@ -126,8 +137,8 @@ async function waitForChassisChange(page, before) {
   throw new Error(`Chassis text did not change within ${API_TIMEOUT / 1000}s`);
 }
 
-// ─── رفع الملف مع إعادة المحاولة إذا لم يظهر العنصر ─────────────────────
-async function uploadFile(page, imageFile, timeoutMs = 60000) {
+// ─── رفع الملف (مهلة قصيرة، لا إعادة تحميل) ────────────────────────────
+async function uploadFile(page, imageFile, timeoutMs = 15000) {
   const selectors = [
     'input[type="file"]',
     'input[id="regImage"]',
@@ -136,7 +147,7 @@ async function uploadFile(page, imageFile, timeoutMs = 60000) {
     'input[type="file"][accept]',
   ];
 
-  // المحاولة الأولى
+  // محاولة واحدة سريعة
   for (const selector of selectors) {
     try {
       const fileInput = page.locator(selector).first();
@@ -148,29 +159,8 @@ async function uploadFile(page, imageFile, timeoutMs = 60000) {
     }
   }
 
-  // إذا فشلت كل المحاولات، أعد تحميل الصفحة وجرب مرة أخرى
-  console.log('   ⚠️  File input not found, retrying after page reload...');
-  await page.reload({ waitUntil: 'networkidle', timeout: 60000 });
-  await page.waitForTimeout(3000);
-
-  // المحاولة الثانية بعد إعادة التحميل
-  for (const selector of selectors) {
-    try {
-      const fileInput = page.locator(selector).first();
-      await fileInput.waitFor({ state: 'attached', timeout: timeoutMs });
-      await fileInput.setInputFiles(imageFile);
-      return;
-    } catch {
-      // تابع
-    }
-  }
-
-  // المحاولة الأخيرة بالإنتظار المباشر
-  await page.waitForSelector('input[type="file"]', {
-    state: 'attached',
-    timeout: timeoutMs,
-  });
-  await page.locator('input[type="file"]').first().setInputFiles(imageFile);
+  // إذا لم يظهر، فشل سريع
+  throw new Error(`File input not found within ${timeoutMs / 1000}s`);
 }
 
 // ─── النقر على Copy ────────────────────────────────────────────────────
@@ -259,7 +249,7 @@ async function runSingleUser(userId, batchSize) {
     // ── بداية الرحلة ─────────────────────────────────────────────
     const journeyStart = Date.now();
 
-    // ── رفع الصورة (مع إعادة المحاولة التلقائية) ──────────────────
+    // ── رفع الصورة (مهلة قصيرة، لا إعادة تحميل) ──────────────────
     const uploadStart = Date.now();
     await uploadFile(page, imageFile);
     timings.upload = Date.now() - uploadStart;
@@ -408,13 +398,14 @@ function assessHealth(successRate, apiP95) {
 // ─── الرئيسية ───────────────────────────────────────────────────────────
 async function main() {
   console.log('\n📱 ========================================');
-  console.log('📱 iCarsU MOBILE LOAD TEST - PLAYWRIGHT');
+  console.log('📱 iCarsU MOBILE LOAD TEST - FINAL VERSION');
   console.log('📱 GitHub Actions | Stable Network');
   console.log('📱 Flow: Page Load → Upload → API → Copy');
   console.log('📱 TRUE CONCURRENCY — كل batch كلها مع بعض');
   console.log('📱 Cooldown: 30s قبل batch 50 & 100 | 10s للباقي');
   console.log('📱 REALISTIC: متصفح + جهاز + UA مختلف لكل يوزر');
-  console.log('📱 مع إعادة تحميل الصفحة إذا تأخر عنصر الرفع');
+  console.log('📱 Fast-fail: فشل فوري إذا لم يظهر زر الرفع خلال 15 ثانية');
+  console.log('📱 VIN Validation: التأكد من صحة رقم الشاسيه');
   console.log('📱 ========================================\n');
 
   for (let i = 0; i < BATCHES.length; i++) {
@@ -517,7 +508,7 @@ async function main() {
   console.log(`   ❌ Server overloaded at          : ${firstOverload ? firstOverload.size : `> ${lastBatch?.size ?? '?'} (all batches passed)`}`);
   console.log('');
   console.log('   📌 FULL TOTAL = Page Load + Upload + API + Copy');
-  console.log('   📌 مع إعادة تحميل تلقائية للصفحة عند فشل ظهور عنصر الرفع');
+  console.log('   📌 تظهر الأخطاء بسرعة عند ضغط السيرفر (لا إعادة تحميل)');
   console.log('');
 }
 
