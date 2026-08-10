@@ -3,27 +3,47 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 
-// ──────────────── الإعدادات ────────────────
-const TARGET_URL = 'https://icarsu.com/chassis-test.html';
+// ═══════════════════ الإعدادات ═══════════════════
+const TARGET_URL = 'https://icarsu.com/chassis-test.html'; // ★ صفحة ثابتة
 const IMAGES = [
   './chassis1.jpg','./chassis2.jpg','./chassis3.jpg','./chassis4.jpg','./chassis5.jpg',
   './chassis6.jpg','./chassis7.jpg','./chassis8.jpg','./chassis9.jpg','./chassis10.jpg',
 ];
 const BATCHES = [5, 10, 15, 20, 50, 100];
 const LONG_COOLDOWN_BEFORE = [50, 100];
-const COOLDOWN_LONG  = 30000;
-const COOLDOWN_SHORT = 10000;
+const COOLDOWN_LONG  = 30000; // 30 ثانية
+const COOLDOWN_SHORT = 10000; // 10 ثوان
 const allResults = [];
 
-// ─── رفع الصورة مباشرة (عنصر input موجود حتماً) ───
+// ─── دوال مساعدة ─────────────────────────────────
+function avg(arr) {
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+function percentile(arr, p) {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const index = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, index)] ?? 0;
+}
+
+function assessHealth(successRate, apiP95) {
+  if (successRate === 0)  return '💀 FAILED';
+  if (successRate < 50)   return '💀 OVERLOADED';
+  if (successRate < 80)   return '🔴 CRITICAL';
+  if (apiP95 > 20000)     return '🟠 DEGRADED';
+  if (apiP95 > 10000)     return '🟡 GOOD';
+  return '🟢 EXCELLENT';
+}
+
+// ─── رفع الصورة (الحقل موجود حتماً) ──────────────
 async function uploadImage(page, imageFile) {
   await page.waitForSelector('#regImage', { state: 'attached', timeout: 10000 });
   await page.locator('#regImage').setInputFiles(imageFile);
 }
 
-// ─── انتظار ظهور الشاسيه أو خطأ ───
+// ─── انتظار نتيجة OCR ────────────────────────────
 async function waitForChassisResult(page) {
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + 120000; // دقيقتين كحد أقصى
   while (Date.now() < deadline) {
     const result = await page.evaluate(() => {
       const chassis = document.getElementById('chassisText')?.innerText?.trim() || '';
@@ -31,17 +51,20 @@ async function waitForChassisResult(page) {
       return { chassis, status };
     }).catch(() => ({ chassis: '', status: '' }));
 
+    // تحقق من وجود VIN صحيح
     if (result.chassis.length === 17 && /^[A-HJ-NPR-Z0-9]{17}$/.test(result.chassis)) {
       return result.chassis;
     }
+    // تحقق من رسائل الخطأ
     if (result.status.includes('failed') || result.status.includes('No chassis')) {
       throw new Error('OCR failed: ' + result.status);
     }
     await page.waitForTimeout(300);
   }
-  throw new Error('OCR timeout');
+  throw new Error('OCR timeout (no response)');
 }
 
+// ─── مستخدم واحد ─────────────────────────────────
 async function runSingleUser(userId, batchSize) {
   let browser;
   const imageFile = IMAGES[(userId - 1) % IMAGES.length];
@@ -53,14 +76,17 @@ async function runSingleUser(userId, batchSize) {
 
     const fullStart = Date.now();
 
+    // تحميل الصفحة
     const pStart = Date.now();
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     timings.pageLoad = Date.now() - pStart;
 
+    // رفع الصورة
     const upStart = Date.now();
     await uploadImage(page, imageFile);
     timings.upload = Date.now() - upStart;
 
+    // انتظار نتيجة OCR
     const apiStart = Date.now();
     const chassis = await waitForChassisResult(page);
     timings.api = Date.now() - apiStart;
@@ -84,10 +110,10 @@ async function runSingleUser(userId, batchSize) {
   }
 }
 
+// ─── تشغيل دفعة ──────────────────────────────────
 async function runBatch(size) {
   console.log(`\n${'='.repeat(60)}\n🔥 BATCH: ${size} USERS\n${'='.repeat(60)}`);
 
-  // ✅ تعريف startTime هنا
   const startTime = Date.now();
 
   const results = await Promise.all(
@@ -152,29 +178,10 @@ async function runBatch(size) {
   };
 }
 
-// ─── إحصائيات ──────────────────────────────────────────────
-function avg(arr) {
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
-function percentile(arr, p) {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const index = Math.ceil((p / 100) * sorted.length) - 1;
-  return sorted[Math.max(0, index)] ?? 0;
-}
-
-function assessHealth(successRate, apiP95) {
-  if (successRate === 0)  return '💀 FAILED';
-  if (successRate < 50)   return '💀 OVERLOADED';
-  if (successRate < 80)   return '🔴 CRITICAL';
-  if (apiP95 > 20000)     return '🟠 DEGRADED';
-  if (apiP95 > 10000)     return '🟡 GOOD';
-  return '🟢 EXCELLENT';
-}
-
-// ─── الرئيسية ──────────────────────────────────────────────
+// ─── البرنامج الرئيسي ────────────────────────────
 async function main() {
-  console.log('🚀 iCarsU OCR LOAD TEST (static page)\n');
+  console.log('🚀 iCarsU OCR LOAD TEST (Static Page - Final)');
+  console.log('══════════════════════════════════════════');
 
   for (let i = 0; i < BATCHES.length; i++) {
     const size = BATCHES[i];
@@ -189,8 +196,12 @@ async function main() {
       console.log(`   Health: ${assessHealth(result.successRate, result.timings.api.p95)}`);
     } else {
       console.log(`\n❌ Batch ${size}: ALL FAILED`);
+      if (result.errors?.length) {
+        console.log('   Errors:', result.errors.slice(0, 3).join(' | '));
+      }
     }
 
+    // تهدئة بين الدفعات
     if (i < BATCHES.length - 1) {
       const nextBatch = BATCHES[i + 1];
       const isLong = LONG_COOLDOWN_BEFORE.includes(nextBatch);
@@ -200,7 +211,7 @@ async function main() {
     }
   }
 
-  // حفظ CSV
+  // ─── تقرير CSV ─────────────────────────────────
   let csv = 'Users,Success,SuccessRate,WallTime_s,PageLoad_avg_s,PageLoad_p95_s,API_avg_s,API_p95_s,FULL_avg_s,FULL_p95_s,Upload_avg_s,Health\n';
   allResults.forEach(r => {
     if (r.timings) {
@@ -216,7 +227,27 @@ async function main() {
   fs.writeFileSync('load-test-results.csv', csv);
   fs.writeFileSync('load-test-results.json', JSON.stringify(allResults, null, 2));
 
-  console.log('\n✅ Test complete. Results saved.');
+  // ─── جدول نهائي ─────────────────────────────────
+  console.log('\n' + '='.repeat(100));
+  console.log('📊 FINAL REPORT');
+  console.log('='.repeat(100));
+  console.log('Users │ Success │ Page (avg/p95) │ API (avg/p95) │ FULL (avg/p95) │ Health');
+  console.log('──────┼─────────┼────────────────┼───────────────┼────────────────┼──────────');
+  allResults.forEach(r => {
+    if (r.timings) {
+      const u = r.size.toString().padEnd(5);
+      const s = `${r.success}/${r.total}`.padEnd(7);
+      const pg = `${(r.timings.pageLoad.avg/1000).toFixed(1)}/${(r.timings.pageLoad.p95/1000).toFixed(1)}s`.padEnd(14);
+      const ap = `${(r.timings.api.avg/1000).toFixed(1)}/${(r.timings.api.p95/1000).toFixed(1)}s`.padEnd(13);
+      const fl = `${(r.timings.full.avg/1000).toFixed(1)}/${(r.timings.full.p95/1000).toFixed(1)}s`.padEnd(14);
+      const hl = assessHealth(r.successRate, r.timings.api.p95);
+      console.log(`${u} │ ${s} │ ${pg} │ ${ap} │ ${fl} │ ${hl}`);
+    } else {
+      console.log(`${r.size.toString().padEnd(5)} │ 0/${r.total}  │ -              │ -             │ -              │ FAILED`);
+    }
+  });
+  console.log('='.repeat(100));
+  console.log('\n📝 Results saved to load-test-results.csv & .json');
 }
 
-main().catch(console.error); 
+main().catch(console.error);
